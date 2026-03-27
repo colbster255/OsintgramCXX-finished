@@ -112,6 +112,8 @@ namespace IG {
         std::vector<UserEntry> FetchTaggedUsers(const std::string& userId);
         std::vector<UserEntry> SearchUsers(const std::string& query, int maxCount = 10);
 
+        ~SessionManager();
+
     private:
         SessionManager() = default;
         SessionManager(const SessionManager&) = delete;

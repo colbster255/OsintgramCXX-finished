@@ -32,6 +32,21 @@ namespace IG {
     }
 
     // -------------------------------------------------------------------------
+    // Destructor – auto-logout on program exit to avoid stale sessions
+    // -------------------------------------------------------------------------
+    SessionManager::~SessionManager() {
+        if (_currentUser.authenticated) {
+            try {
+                // Fire-and-forget logout so Instagram doesn't accumulate sessions
+                MakeAuthenticatedRequest(WEB_BASE + "/accounts/logout/ajax/",
+                                         RequestMethod::REQ_POST,
+                                         "one_click_logout=&user_id=" + _currentUser.dsUserId);
+            } catch (...) {}
+            _currentUser.authenticated = false;
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Device / headers
     // -------------------------------------------------------------------------
     std::string SessionManager::BuildUserAgent() const {
@@ -590,8 +605,11 @@ namespace IG {
     void SessionManager::Logout() {
         std::lock_guard<std::mutex> lock(_mutex);
         if (_currentUser.authenticated) {
-            try { MakeAuthenticatedRequest(API_BASE + "/accounts/logout/", RequestMethod::REQ_POST); }
-            catch (...) {}
+            try {
+                MakeAuthenticatedRequest(WEB_BASE + "/accounts/logout/ajax/",
+                                         RequestMethod::REQ_POST,
+                                         "one_click_logout=&user_id=" + _currentUser.dsUserId);
+            } catch (...) {}
         }
         _currentUser  = UserSession{};
         _currentTarget = TargetInfo{};
