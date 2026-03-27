@@ -653,13 +653,13 @@ namespace IG {
         ResponseData profileResp = MakeAuthenticatedRequest(profileUrl);
 
         // If web_profile_info fails, try the public JSON endpoint
-        if (profileResp.statusCode != 200) {
+        if (profileResp.statusCode < 200 || profileResp.statusCode >= 300) {
             // Fallback: public profile JSON
             std::string publicUrl = WEB_BASE + "/" + username + "/?__a=1&__d=dis";
             profileResp = MakeAuthenticatedRequest(publicUrl);
         }
 
-        if (profileResp.statusCode != 200) {
+        if (profileResp.statusCode < 200 || profileResp.statusCode >= 300) {
             std::cerr << "[!] Failed to fetch profile for '" << username
                       << "' (HTTP " << profileResp.statusCode << ")" << std::endl;
             return std::nullopt;
@@ -751,7 +751,7 @@ namespace IG {
             std::string url = API_BASE + "/friendships/" + userId + "/followers/?count=50&search_surface=follow_list_page";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
-            if (resp.statusCode != 200) break;
+            if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("users")) break;
@@ -783,7 +783,7 @@ namespace IG {
             std::string url = API_BASE + "/friendships/" + userId + "/following/?count=50";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
-            if (resp.statusCode != 200) break;
+            if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("users")) break;
@@ -818,7 +818,7 @@ namespace IG {
             std::string url = API_BASE + "/feed/user/" + userId + "/?count=12";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
-            if (resp.statusCode != 200) break;
+            if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("items")) break;
@@ -877,7 +877,7 @@ namespace IG {
             std::string url = API_BASE + "/media/" + mediaId + "/comments/?can_support_threading=true&count=50";
             if (!minId.empty()) url += "&min_id=" + minId;
             ResponseData resp = MakeAuthenticatedRequest(url);
-            if (resp.statusCode != 200) break;
+            if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("comments")) break;
@@ -906,7 +906,7 @@ namespace IG {
     std::vector<UserEntry> SessionManager::FetchMediaLikers(const std::string& mediaId, int maxCount) {
         std::vector<UserEntry> results;
         ResponseData resp = MakeAuthenticatedRequest(API_BASE + "/media/" + mediaId + "/likers/");
-        if (resp.statusCode != 200) return results;
+        if (resp.statusCode < 200 || resp.statusCode >= 300) return results;
         try {
             json data = json::parse(std::get<ByteData>(resp.body));
             if (!data.contains("users")) return results;
@@ -930,7 +930,7 @@ namespace IG {
         ResponseData resp = _currentUser.authenticated
             ? MakeAuthenticatedRequest(API_BASE + "/users/" + userId + "/info/")
             : MakePublicRequest(API_BASE + "/users/" + userId + "/info/");
-        if (resp.statusCode != 200) return std::nullopt;
+        if (resp.statusCode < 200 || resp.statusCode >= 300) return std::nullopt;
         try {
             json data = json::parse(std::get<ByteData>(resp.body));
             if (data.contains("user")) {
@@ -953,10 +953,10 @@ namespace IG {
             API_BASE + "/feed/reels_media/?reel_ids=" + userId);
 
         // Fallback to user story endpoint
-        if (resp.statusCode != 200)
+        if (resp.statusCode < 200 || resp.statusCode >= 300)
             resp = MakeAuthenticatedRequest(API_BASE + "/feed/user/" + userId + "/story/");
 
-        if (resp.statusCode != 200) return stories;
+        if (resp.statusCode < 200 || resp.statusCode >= 300) return stories;
 
         try {
             json data = json::parse(std::get<ByteData>(resp.body));
@@ -1009,14 +1009,14 @@ namespace IG {
                         + "&context=blended&include_reel=false";
         ResponseData resp = MakeAuthenticatedRequest(url);
 
-        if (resp.statusCode != 200) {
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
             // Fallback: try the API v1 search endpoint on www domain
             url = API_BASE + "/web/search/topsearch/?query=" + urlEncode(query)
                 + "&context=user&count=" + std::to_string(maxCount);
             resp = MakeAuthenticatedRequest(url);
         }
 
-        if (resp.statusCode != 200) return results;
+        if (resp.statusCode < 200 || resp.statusCode >= 300) return results;
 
         try {
             json data = json::parse(std::get<ByteData>(resp.body));
