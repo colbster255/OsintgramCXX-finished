@@ -19,7 +19,7 @@
 
 namespace IG {
 
-    const std::string SessionManager::API_BASE = "https://i.instagram.com/api/v1";
+    const std::string SessionManager::API_BASE = "https://www.instagram.com/api/v1";
     const std::string SessionManager::WEB_BASE  = "https://www.instagram.com";
     const std::string SessionManager::IG_APP_ID = "936619743392459";
 
