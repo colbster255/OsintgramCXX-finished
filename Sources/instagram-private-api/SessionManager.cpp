@@ -644,75 +644,93 @@ namespace IG {
     }
 
     // -------------------------------------------------------------------------
-    // Fetch user info
+    // Fetch user info  (web endpoints)
     // -------------------------------------------------------------------------
     std::optional<TargetInfo> SessionManager::FetchUserInfo(const std::string& username) {
-        std::string searchUrl = API_BASE + "/users/search/?q=" + username
-                              + "&count=1&timezone_offset=0";
+        // Web profile info endpoint – works with web session
+        std::string profileUrl = WEB_BASE + "/api/v1/users/web_profile_info/?username=" + username;
 
-        ResponseData searchResp = _currentUser.authenticated
-            ? MakeAuthenticatedRequest(searchUrl)
-            : MakePublicRequest(searchUrl);
+        ResponseData profileResp = MakeAuthenticatedRequest(profileUrl);
 
-        if (searchResp.statusCode != 200) {
-            std::cerr << "[!] Failed to search for user '" << username
-                      << "' (HTTP " << searchResp.statusCode << ")" << std::endl;
+        // If web_profile_info fails, try the public JSON endpoint
+        if (profileResp.statusCode != 200) {
+            // Fallback: public profile JSON
+            std::string publicUrl = WEB_BASE + "/" + username + "/?__a=1&__d=dis";
+            profileResp = MakeAuthenticatedRequest(publicUrl);
+        }
+
+        if (profileResp.statusCode != 200) {
+            std::cerr << "[!] Failed to fetch profile for '" << username
+                      << "' (HTTP " << profileResp.statusCode << ")" << std::endl;
             return std::nullopt;
         }
 
         try {
-            json searchJson = json::parse(std::get<ByteData>(searchResp.body));
+            std::string body = std::get<ByteData>(profileResp.body);
+            json data = json::parse(body);
 
-            if (!searchJson.contains("users") || searchJson["users"].empty()) {
+            // web_profile_info returns { "data": { "user": { ... } } }
+            // public JSON returns { "graphql": { "user": { ... } } }
+            json userJson;
+            if (data.contains("data") && data["data"].contains("user"))
+                userJson = data["data"]["user"];
+            else if (data.contains("graphql") && data["graphql"].contains("user"))
+                userJson = data["graphql"]["user"];
+            else if (data.contains("user"))
+                userJson = data["user"];
+            else {
                 std::cerr << "[!] User '" << username << "' not found." << std::endl;
                 return std::nullopt;
             }
 
-            json targetUser;
-            bool found = false;
-            for (const auto& u : searchJson["users"]) {
-                if (u.value("username", "") == username) { targetUser = u; found = true; break; }
-            }
-            if (!found) targetUser = searchJson["users"][0];
-
-            std::string userId = std::to_string(targetUser.value("pk", 0LL));
-
-            // Fetch detailed info
-            std::string infoUrl = API_BASE + "/users/" + userId + "/info/";
-            ResponseData infoResp = _currentUser.authenticated
-                ? MakeAuthenticatedRequest(infoUrl)
-                : MakePublicRequest(infoUrl);
-
             TargetInfo info;
-            info.username = username;
-            info.userId   = userId;
+            info.username       = userJson.value("username", username);
+            info.fullName       = userJson.value("full_name", "");
+            info.biography      = userJson.value("biography", "");
+            info.externalUrl    = userJson.value("external_url", "");
+            info.profilePicUrl  = userJson.value("profile_pic_url", "");
+            info.isPrivate      = userJson.value("is_private", false);
+            info.isVerified     = userJson.value("is_verified", false);
+            info.isBusiness     = userJson.value("is_business_account", false);
+            info.category       = userJson.value("category_name", "");
 
-            if (infoResp.statusCode == 200) {
-                json ij = json::parse(std::get<ByteData>(infoResp.body));
-                if (ij.contains("user")) {
-                    auto& u = ij["user"];
-                    info.fullName      = u.value("full_name",       "");
-                    info.biography     = u.value("biography",       "");
-                    info.externalUrl   = u.value("external_url",    "");
-                    info.profilePicUrl = u.value("profile_pic_url", "");
-                    info.followerCount = u.value("follower_count",  0);
-                    info.followingCount= u.value("following_count", 0);
-                    info.mediaCount    = u.value("media_count",     0);
-                    info.isPrivate     = u.value("is_private",      false);
-                    info.isVerified    = u.value("is_verified",     false);
-                    info.isBusiness    = u.value("is_business",     false);
-                    info.category      = u.value("category",        "");
-                    info.email         = u.value("public_email",    "");
-                    info.phoneNumber   = u.value("public_phone_number", "");
-                    if (u.contains("hd_profile_pic_url_info"))
-                        info.profilePicUrlHD = u["hd_profile_pic_url_info"].value("url", info.profilePicUrl);
-                }
-            } else {
-                info.fullName      = targetUser.value("full_name",       "");
-                info.profilePicUrl = targetUser.value("profile_pic_url", "");
-                info.isPrivate     = targetUser.value("is_private",      false);
-                info.isVerified    = targetUser.value("is_verified",     false);
-            }
+            // User ID can be in different fields
+            if (userJson.contains("id"))
+                info.userId = userJson["id"].is_string()
+                    ? userJson["id"].get<std::string>()
+                    : std::to_string(userJson.value("id", 0LL));
+            else if (userJson.contains("pk"))
+                info.userId = std::to_string(userJson.value("pk", 0LL));
+
+            // Counts - web format uses edge_* or direct count fields
+            if (userJson.contains("edge_followed_by"))
+                info.followerCount = userJson["edge_followed_by"].value("count", 0);
+            else
+                info.followerCount = userJson.value("follower_count", 0);
+
+            if (userJson.contains("edge_follow"))
+                info.followingCount = userJson["edge_follow"].value("count", 0);
+            else
+                info.followingCount = userJson.value("following_count", 0);
+
+            if (userJson.contains("edge_owner_to_timeline_media"))
+                info.mediaCount = userJson["edge_owner_to_timeline_media"].value("count", 0);
+            else
+                info.mediaCount = userJson.value("media_count", 0);
+
+            // Email/phone (business accounts only)
+            info.email       = userJson.value("public_email", "");
+            info.phoneNumber = userJson.value("public_phone_number", "");
+            if (info.email.empty())
+                info.email = userJson.value("business_email", "");
+
+            // HD profile pic
+            if (userJson.contains("profile_pic_url_hd"))
+                info.profilePicUrlHD = userJson.value("profile_pic_url_hd", info.profilePicUrl);
+            else if (userJson.contains("hd_profile_pic_url_info"))
+                info.profilePicUrlHD = userJson["hd_profile_pic_url_info"].value("url", info.profilePicUrl);
+            else
+                info.profilePicUrlHD = info.profilePicUrl;
 
             return info;
 
@@ -929,14 +947,33 @@ namespace IG {
 
     std::vector<MediaItem> SessionManager::FetchStories(const std::string& userId) {
         std::vector<MediaItem> stories;
-        ResponseData resp = MakeAuthenticatedRequest(API_BASE + "/feed/user/" + userId + "/story/");
+
+        // Try web-compatible reels_media endpoint first
+        ResponseData resp = MakeAuthenticatedRequest(
+            API_BASE + "/feed/reels_media/?reel_ids=" + userId);
+
+        // Fallback to user story endpoint
+        if (resp.statusCode != 200)
+            resp = MakeAuthenticatedRequest(API_BASE + "/feed/user/" + userId + "/story/");
+
         if (resp.statusCode != 200) return stories;
+
         try {
             json data = json::parse(std::get<ByteData>(resp.body));
-            if (!data.contains("reel") || data["reel"].is_null()) return stories;
-            auto& reel = data["reel"];
-            if (!reel.contains("items")) return stories;
-            for (const auto& item : reel["items"]) {
+
+            // reels_media returns { "reels": { "<userId>": { "items": [...] } } }
+            // user story returns { "reel": { "items": [...] } }
+            json items;
+            if (data.contains("reels") && data["reels"].contains(userId) &&
+                data["reels"][userId].contains("items"))
+                items = data["reels"][userId]["items"];
+            else if (data.contains("reel") && !data["reel"].is_null() &&
+                     data["reel"].contains("items"))
+                items = data["reel"]["items"];
+            else
+                return stories;
+
+            for (const auto& item : items) {
                 MediaItem m;
                 m.mediaId   = std::to_string(item.value("pk", 0LL));
                 m.takenAt   = std::to_string(item.value("taken_at", 0LL));
@@ -966,24 +1003,48 @@ namespace IG {
 
     std::vector<UserEntry> SessionManager::SearchUsers(const std::string& query, int maxCount) {
         std::vector<UserEntry> results;
-        std::string url = API_BASE + "/users/search/?q=" + query
-                        + "&count=" + std::to_string(maxCount) + "&timezone_offset=0";
-        ResponseData resp = _currentUser.authenticated
-            ? MakeAuthenticatedRequest(url)
-            : MakePublicRequest(url);
+
+        // Web search endpoint (mobile /users/search/ doesn't work with web sessions)
+        std::string url = WEB_BASE + "/web/search/topsearch/?query=" + urlEncode(query)
+                        + "&context=blended&include_reel=false";
+        ResponseData resp = MakeAuthenticatedRequest(url);
+
+        if (resp.statusCode != 200) {
+            // Fallback: try the API v1 search endpoint on www domain
+            url = API_BASE + "/web/search/topsearch/?query=" + urlEncode(query)
+                + "&context=user&count=" + std::to_string(maxCount);
+            resp = MakeAuthenticatedRequest(url);
+        }
+
         if (resp.statusCode != 200) return results;
+
         try {
             json data = json::parse(std::get<ByteData>(resp.body));
-            if (!data.contains("users")) return results;
-            for (const auto& u : data["users"]) {
-                UserEntry e;
-                e.username      = u.value("username",       "");
-                e.userId        = std::to_string(u.value("pk", 0LL));
-                e.fullName      = u.value("full_name",       "");
-                e.profilePicUrl = u.value("profile_pic_url","");
-                e.isPrivate     = u.value("is_private",      false);
-                e.isVerified    = u.value("is_verified",     false);
-                results.push_back(e);
+
+            // Web topsearch returns { "users": [ { "user": { ... }, "position": N }, ... ] }
+            if (data.contains("users")) {
+                int n = 0;
+                for (const auto& entry : data["users"]) {
+                    if (n >= maxCount) break;
+                    // Web format wraps each user in a { "user": {...} } object
+                    json u = entry.contains("user") ? entry["user"] : entry;
+                    UserEntry e;
+                    e.username      = u.value("username",       "");
+                    e.fullName      = u.value("full_name",       "");
+                    e.profilePicUrl = u.value("profile_pic_url","");
+                    e.isPrivate     = u.value("is_private",      false);
+                    e.isVerified    = u.value("is_verified",     false);
+                    if (u.contains("pk"))
+                        e.userId = u["pk"].is_string()
+                            ? u["pk"].get<std::string>()
+                            : std::to_string(u.value("pk", 0LL));
+                    else if (u.contains("id"))
+                        e.userId = u["id"].is_string()
+                            ? u["id"].get<std::string>()
+                            : std::to_string(u.value("id", 0LL));
+                    results.push_back(e);
+                    n++;
+                }
             }
         } catch (...) {}
         return results;
