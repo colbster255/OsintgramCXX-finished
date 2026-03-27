@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <chrono>
+#include <cctype>
+#include <dev_tools/network/URLParams.hpp>
 
 namespace IG {
 
@@ -123,6 +125,9 @@ namespace IG {
         _currentUser = UserSession{};
         _currentUser.username = username;
         _currentUser.userAgent = BuildUserAgent();
+        _twoFactorPending = false;
+        _twoFactorUseTotp = false;
+        _twoFactorIdentifier.clear();
 
         // Step 1: Fetch CSRF token from accounts/login page
         {
@@ -140,26 +145,37 @@ namespace IG {
         }
 
         // Step 2: Perform login
-        std::string timestamp = std::to_string(std::time(nullptr));
+        const std::string encPassword =
+            "#PWD_INSTAGRAM:0:" + std::to_string(std::time(nullptr)) + ":" + password;
 
-        std::ostringstream loginBody;
-        loginBody << "signed_body=SIGNATURE."
-                  << "%7B"
-                  << "%22phone_id%22%3A%22" << "a1b2c3d4-e5f6-7890-abcd-ef1234567890" << "%22%2C"
-                  << "%22_csrftoken%22%3A%22" << _currentUser.csrfToken << "%22%2C"
-                  << "%22username%22%3A%22" << username << "%22%2C"
-                  << "%22guid%22%3A%22" << "a1b2c3d4-e5f6-7890-abcd-ef1234567890" << "%22%2C"
-                  << "%22device_id%22%3A%22" << "android-a1b2c3d4e5f67890" << "%22%2C"
-                  << "%22password%22%3A%22" << password << "%22%2C"
-                  << "%22login_attempt_count%22%3A%220%22"
-                  << "%7D"
-                  << "&ig_sig_key_version=" << IG_SIG_KEY_VERSION;
+        json payload = {
+            {"phone_id", "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+            {"_csrftoken", _currentUser.csrfToken},
+            {"username", username},
+            {"guid", "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+            {"device_id", "android-a1b2c3d4e5f67890"},
+            {"enc_password", encPassword},
+            {"login_attempt_count", "0"}
+        };
+
+        std::string loginBody = EncodeURLParams({
+            {"signed_body", "SIGNATURE." + payload.dump()},
+            {"ig_sig_key_version", IG_SIG_KEY_VERSION}
+        });
 
         RequestData loginReq;
         loginReq.url = API_BASE + "/accounts/login/";
         loginReq.method = RequestMethod::REQ_POST;
         loginReq.headers = BuildCommonHeaders();
-        loginReq.body = ByteData(loginBody.str());
+        if (!_currentUser.csrfToken.empty()) {
+            std::string loginCookies = "csrftoken=" + _currentUser.csrfToken;
+            if (!_currentUser.mid.empty())
+                loginCookies += "; mid=" + _currentUser.mid;
+
+            loginReq.headers.emplace_back("Cookie", loginCookies);
+            loginReq.headers.emplace_back("X-CSRFToken", _currentUser.csrfToken);
+        }
+        loginReq.body = ByteData(loginBody);
         loginReq.connTimeoutMillis = 30000;
         loginReq.readTimeoutMillis = 30000;
         loginReq.followRedirects = true;
@@ -173,11 +189,26 @@ namespace IG {
         // Parse JSON response
         try {
             std::string respBody = std::get<ByteData>(loginResp.body);
+            if (respBody.empty()) {
+                std::cerr << "[!] Login failed: empty response body";
+                if (!loginResp.errorData.empty()) {
+                    std::cerr << " (" << loginResp.errorData << ")";
+                }
+                std::cerr << std::endl;
+                return false;
+            }
+
+            auto firstNonWs = std::find_if_not(respBody.begin(), respBody.end(), [](unsigned char c) {
+                return std::isspace(c) != 0;
+            });
+            if (firstNonWs == respBody.end() || (*firstNonWs != '{' && *firstNonWs != '['))
+                throw json::parse_error::create(101, 1, "non-JSON login response", nullptr);
+
             json respJson = json::parse(respBody);
 
-            if (respJson.contains("logged_in_user")) {
-                auto& user = respJson["logged_in_user"];
-                _currentUser.userId = std::to_string(user.value("pk", 0L));
+            if (respJson.contains("logged_in_user") || respJson.contains("user")) {
+                auto& user = respJson.contains("logged_in_user") ? respJson["logged_in_user"] : respJson["user"];
+                _currentUser.userId = std::to_string(user.value("pk", user.value("id", 0L)));
                 _currentUser.authenticated = true;
 
                 // Build auth headers for future requests
@@ -190,15 +221,38 @@ namespace IG {
                 return true;
             }
 
-            if (respJson.contains("two_factor_required") && respJson["two_factor_required"].get<bool>()) {
+            if (respJson.value("status", "") == "ok" && !_currentUser.sessionId.empty() && !_currentUser.dsUserId.empty()) {
+                _currentUser.userId = _currentUser.dsUserId;
+                _currentUser.authenticated = true;
+                return true;
+            }
+
+            bool hasTwoFactorRequirement =
+                (respJson.contains("two_factor_required") && respJson["two_factor_required"].get<bool>()) ||
+                respJson.value("error_type", "") == "two_factor_required";
+
+            if (hasTwoFactorRequirement) {
+                _twoFactorPending = true;
+                _twoFactorIdentifier = respJson.value("two_factor_info", json::object()).value("two_factor_identifier", "");
+                _twoFactorUseTotp = respJson.value("two_factor_info", json::object()).value("totp_two_factor_on", false);
+
                 std::cerr << "[!] Two-factor authentication required." << std::endl;
-                std::cerr << "[!] 2FA support is not yet fully implemented." << std::endl;
-                std::cerr << "[!] Please disable 2FA temporarily or use an app password." << std::endl;
+                std::cerr << "[*] Use method: " << (_twoFactorUseTotp ? "TOTP authenticator code" : "SMS/WhatsApp code") << std::endl;
+                if (_twoFactorIdentifier.empty())
+                    std::cerr << "[!] Missing two_factor_identifier from response; cannot complete 2FA login." << std::endl;
                 return false;
             }
 
             if (respJson.contains("message")) {
-                std::cerr << "[!] Login failed: " << respJson["message"].get<std::string>() << std::endl;
+                std::string message = respJson["message"].get<std::string>();
+                if (message.empty()) {
+                    std::string status = respJson.value("status", "unknown");
+                    std::cerr << "[!] Login failed: no message returned (status=" << status << ")" << std::endl;
+                } else {
+                    std::cerr << "[!] Login failed: " << message << std::endl;
+                }
+            } else if (respJson.contains("status")) {
+                std::cerr << "[!] Login failed: status=" << respJson["status"].get<std::string>() << std::endl;
             }
 
             if (respJson.contains("error_type")) {
@@ -213,8 +267,20 @@ namespace IG {
                 }
             }
 
+            if (respJson.contains("challenge")) {
+                std::cerr << "[!] Challenge data received. Complete verification in Instagram app/web and retry." << std::endl;
+            }
+
         } catch (const json::exception& e) {
             std::cerr << "[!] Failed to parse login response: " << e.what() << std::endl;
+            std::string respBody = std::get<ByteData>(loginResp.body);
+            if (!respBody.empty()) {
+                std::string preview = respBody.substr(0, std::min<std::size_t>(respBody.size(), 200));
+                std::replace(preview.begin(), preview.end(), '\n', ' ');
+                std::replace(preview.begin(), preview.end(), '\r', ' ');
+                std::cerr << "[!] Login HTTP status: " << loginResp.statusCode << std::endl;
+                std::cerr << "[!] Login response preview: " << preview << std::endl;
+            }
 
             // If we got a session ID from cookies, login may have succeeded
             if (!_currentUser.sessionId.empty() && !_currentUser.dsUserId.empty()) {
@@ -225,6 +291,83 @@ namespace IG {
         }
 
         return false;
+    }
+
+    bool SessionManager::CompleteTwoFactorLogin(const std::string& verificationCode) {
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        if (!_twoFactorPending || _twoFactorIdentifier.empty() || _currentUser.username.empty())
+            return false;
+
+        json payload = {
+            {"username", _currentUser.username},
+            {"verification_code", verificationCode},
+            {"two_factor_identifier", _twoFactorIdentifier},
+            {"trust_this_device", "1"},
+            {"verification_method", _twoFactorUseTotp ? "3" : "1"}
+        };
+
+        std::string reqBody = EncodeURLParams({
+            {"signed_body", "SIGNATURE." + payload.dump()},
+            {"ig_sig_key_version", IG_SIG_KEY_VERSION}
+        });
+
+        RequestData req;
+        req.url = API_BASE + "/accounts/two_factor_login/";
+        req.method = RequestMethod::REQ_POST;
+        req.headers = BuildCommonHeaders();
+        if (!_currentUser.csrfToken.empty()) {
+            std::string cookies = "csrftoken=" + _currentUser.csrfToken;
+            if (!_currentUser.mid.empty())
+                cookies += "; mid=" + _currentUser.mid;
+
+            req.headers.emplace_back("Cookie", cookies);
+            req.headers.emplace_back("X-CSRFToken", _currentUser.csrfToken);
+        }
+        req.body = ByteData(reqBody);
+        req.connTimeoutMillis = 30000;
+        req.readTimeoutMillis = 30000;
+        req.followRedirects = true;
+        req.verifySSL = true;
+
+        ResponseData resp = CreateRequest(req);
+        ParseLoginCookies(resp.headers);
+
+        try {
+            std::string respBody = std::get<ByteData>(resp.body);
+            if (respBody.empty()) return false;
+            json respJson = json::parse(respBody);
+
+            if (respJson.contains("logged_in_user") || respJson.contains("user") ||
+                (respJson.value("status", "") == "ok" && !_currentUser.sessionId.empty() && !_currentUser.dsUserId.empty())) {
+                _currentUser.authenticated = true;
+                if (_currentUser.userId.empty())
+                    _currentUser.userId = !_currentUser.dsUserId.empty() ? _currentUser.dsUserId : "0";
+
+                _currentUser.authHeaders.emplace_back("Cookie",
+                    "sessionid=" + _currentUser.sessionId +
+                    "; csrftoken=" + _currentUser.csrfToken +
+                    "; ds_user_id=" + _currentUser.dsUserId);
+                _currentUser.authHeaders.emplace_back("X-CSRFToken", _currentUser.csrfToken);
+                _twoFactorPending = false;
+                _twoFactorIdentifier.clear();
+                return true;
+            }
+        } catch (...) {
+            return false;
+        }
+
+        return false;
+    }
+
+    bool SessionManager::IsTwoFactorPending() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _twoFactorPending;
+    }
+
+    std::string SessionManager::GetTwoFactorMethodLabel() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _twoFactorUseTotp ? "TOTP authenticator code" : "SMS/WhatsApp code";
     }
 
     void SessionManager::Logout() {
@@ -242,6 +385,9 @@ namespace IG {
         _currentUser = UserSession{};
         _currentTarget = TargetInfo{};
         _hasTarget = false;
+        _twoFactorPending = false;
+        _twoFactorUseTotp = false;
+        _twoFactorIdentifier.clear();
     }
 
     bool SessionManager::IsLoggedIn() const {

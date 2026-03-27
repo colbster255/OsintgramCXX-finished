@@ -95,6 +95,27 @@ static int doLogin(const std::vector<std::string>& args) {
         return 0;
     }
 
+    if (mgr.IsTwoFactorPending()) {
+        std::cout << "[*] Enter " << mgr.GetTwoFactorMethodLabel() << " for '" << username << "': ";
+        std::string verificationCode;
+        std::getline(std::cin, verificationCode);
+
+        if (verificationCode.empty()) {
+            std::cerr << "[!] 2FA code cannot be empty" << std::endl;
+            return 1;
+        }
+
+        std::cout << "[*] Verifying two-factor code..." << std::endl;
+        if (mgr.CompleteTwoFactorLogin(verificationCode)) {
+            std::cout << "[+] Successfully logged in as '" << username << "'" << std::endl;
+            std::cout << "[*] You can now set a target with: sessionctl target <username>" << std::endl;
+            return 0;
+        }
+
+        std::cerr << "[!] Two-factor verification failed for '" << username << "'" << std::endl;
+        return 1;
+    }
+
     std::cerr << "[!] Login failed for '" << username << "'" << std::endl;
     return 1;
 }

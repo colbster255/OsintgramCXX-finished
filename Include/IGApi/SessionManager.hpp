@@ -89,6 +89,9 @@ namespace IG {
 
         // Authentication
         bool Login(const std::string& username, const std::string& password);
+        bool CompleteTwoFactorLogin(const std::string& verificationCode);
+        bool IsTwoFactorPending() const;
+        std::string GetTwoFactorMethodLabel() const;
         void Logout();
         bool IsLoggedIn() const;
         std::string GetCurrentUsername() const;
@@ -133,6 +136,9 @@ namespace IG {
         UserSession _currentUser;
         TargetInfo _currentTarget;
         bool _hasTarget = false;
+        bool _twoFactorPending = false;
+        bool _twoFactorUseTotp = false;
+        std::string _twoFactorIdentifier;
         mutable std::mutex _mutex;
 
         static const std::string API_BASE;
