@@ -134,7 +134,11 @@ namespace IG {
 
         req.headers.emplace_back("Cookie",      cookies);
         req.headers.emplace_back("X-CSRFToken", _currentUser.csrfToken);
-        if (!body.empty()) req.body = ByteData(body);
+        if (!body.empty()) {
+            req.headers.emplace_back("Content-Type",
+                "application/x-www-form-urlencoded");
+            req.body = ByteData(body);
+        }
 
         req.connTimeoutMillis = 30000;
         req.readTimeoutMillis = 30000;
@@ -686,10 +690,11 @@ namespace IG {
             status = resp.statusCode;
             body = GetResponseBody(resp);
 
-            // Retry once on 429 (rate limit) after a short wait
-            if (status == 429) {
-                std::cerr << "[*] Rate limited, waiting 3 seconds..." << std::endl;
-                std::this_thread::sleep_for(std::chrono::seconds(3));
+            // Retry with increasing backoff on 429 (rate limit)
+            for (int wait : {3, 6, 10}) {
+                if (status != 429) break;
+                std::cerr << "[*] Rate limited, waiting " << wait << " seconds..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(wait));
                 resp = MakeAuthenticatedRequest(url);
                 status = resp.statusCode;
                 body = GetResponseBody(resp);
@@ -699,181 +704,57 @@ namespace IG {
                       << ", body=" << body.size() << "B" << std::endl;
         }
 
-        // Attempt 2: direct user info via API (by username -> user ID lookup)
+        // Attempt 2: Instagram GraphQL query (separate rate limit pool)
         if (body.empty() || body[0] != '{') {
-            std::string url = API_BASE + "/users/web_profile_info/?username=" + urlEncode(username);
-            ResponseData resp = MakeAuthenticatedRequest(url);
+            // doc_id for PolarisProfilePageContentQuery (user profile by username)
+            std::string variables = "{\"username\":\"" + username + "\"}";
+            std::string graphqlBody =
+                "variables=" + urlEncode(variables) +
+                "&doc_id=9310670392322965";  // PolarisProfilePageContentQuery
+
+            ResponseData resp = MakeAuthenticatedRequest(
+                WEB_BASE + "/graphql/query/",
+                RequestMethod::REQ_POST,
+                graphqlBody);
             status = resp.statusCode;
-            body = GetResponseBody(resp);
-            std::cerr << "[DBG] api/web_profile_info: HTTP " << status
-                      << ", body=" << body.size() << "B" << std::endl;
+            std::string gqlResp = GetResponseBody(resp);
+
+            std::cerr << "[DBG] graphql: HTTP " << status
+                      << ", body=" << gqlResp.size() << "B" << std::endl;
+
+            if (!gqlResp.empty() && gqlResp[0] == '{') {
+                try {
+                    json gql = json::parse(gqlResp);
+                    // GraphQL response: { "data": { "user": { ... } } }
+                    if (gql.contains("data") && gql["data"].contains("user") &&
+                        !gql["data"]["user"].is_null()) {
+                        body = gql.dump();
+                    }
+                } catch (...) {}
+            }
         }
 
-        // Attempt 3: scrape the profile page HTML for embedded JSON (shared_data)
+        // Attempt 3: older GraphQL query hash endpoint
         if (body.empty() || body[0] != '{') {
-            RequestData req;
-            req.url    = WEB_BASE + "/" + username + "/";
-            req.method = RequestMethod::REQ_GET;
-            req.headers.emplace_back("User-Agent",      _currentUser.userAgent);
-            req.headers.emplace_back("Accept",           "text/html,application/xhtml+xml,*/*");
-            req.headers.emplace_back("Accept-Language",  "en-US,en;q=0.9");
-            req.headers.emplace_back("Accept-Encoding",  "identity");
+            // query_hash for profile info (older but sometimes still works)
+            std::string variables = urlEncode("{\"username\":\"" + username + "\"}");
+            std::string url = WEB_BASE + "/graphql/query/?query_hash=c9100bf9110dd6361671f113dd02e7d6&variables=" + variables;
 
-            std::string cookies = "sessionid=" + _currentUser.sessionId
-                                + "; csrftoken=" + _currentUser.csrfToken
-                                + "; ds_user_id=" + _currentUser.dsUserId;
-            if (!_currentUser.mid.empty()) cookies += "; mid=" + _currentUser.mid;
-            req.headers.emplace_back("Cookie", cookies);
-
-            req.connTimeoutMillis = 30000;
-            req.readTimeoutMillis = 30000;
-            req.followRedirects   = true;
-            req.verifySSL         = true;
-
-            ResponseData resp = CreateRequest(req);
+            ResponseData resp = MakeAuthenticatedRequest(url);
             status = resp.statusCode;
-            std::string html = GetResponseBody(resp);
-            std::cerr << "[DBG] profile HTML: HTTP " << status
-                      << ", body=" << html.size() << "B" << std::endl;
+            std::string gqlResp = GetResponseBody(resp);
 
-            // Extract user data from Instagram's embedded JSON in the HTML
-            if (!html.empty()) {
-                // Modern Instagram embeds data in various script tags. Search for known patterns.
+            std::cerr << "[DBG] graphql_hash: HTTP " << status
+                      << ", body=" << gqlResp.size() << "B" << std::endl;
 
-                // Pattern 1: window._sharedData = {...};
-                auto tryExtract = [&](const std::string& marker, const std::string& endMarker) -> bool {
-                    size_t pos = html.find(marker);
-                    if (pos == std::string::npos) return false;
-                    pos += marker.size();
-                    size_t end = html.find(endMarker, pos);
-                    if (end == std::string::npos) return false;
-                    try {
-                        json j = json::parse(html.substr(pos, end - pos));
-                        if (j.contains("entry_data") && j["entry_data"].contains("ProfilePage") &&
-                            !j["entry_data"]["ProfilePage"].empty()) {
-                            body = j["entry_data"]["ProfilePage"][0].dump();
-                            return true;
-                        }
-                    } catch (...) {}
-                    return false;
-                };
-
-                tryExtract("window._sharedData = ", ";</script>");
-                if (body.empty() || body[0] != '{')
-                    tryExtract("window.__additionalDataLoaded(", ");</script>");
-
-                // Pattern 2: look for JSON blob containing "biography" (unique to user profile data)
-                if (body.empty() || body[0] != '{') {
-                    // Search for the username in a JSON context with profile fields
-                    std::string searchKey = "\"biography\"";
-                    size_t pos = 0;
-                    while (pos < html.size() && (body.empty() || body[0] != '{')) {
-                        pos = html.find(searchKey, pos);
-                        if (pos == std::string::npos) break;
-
-                        // Walk backwards to find the opening brace of the object containing "biography"
-                        // We need to find a '{' that also has "username" nearby
-                        size_t searchStart = (pos > 2000) ? pos - 2000 : 0;
-                        size_t bracePos = html.rfind('{', pos);
-
-                        // Try progressively larger enclosing objects
-                        for (int attempt = 0; attempt < 10 && bracePos > searchStart; attempt++) {
-                            int depth = 0;
-                            size_t end = bracePos;
-                            bool valid = true;
-                            for (size_t i = bracePos; i < html.size() && i < bracePos + 50000; i++) {
-                                if (html[i] == '{') depth++;
-                                else if (html[i] == '}') {
-                                    depth--;
-                                    if (depth == 0) { end = i + 1; break; }
-                                }
-                            }
-                            if (depth != 0) { valid = false; }
-
-                            if (valid && end > bracePos) {
-                                std::string candidate = html.substr(bracePos, end - bracePos);
-                                // Must contain key profile fields
-                                if (candidate.find("\"username\"") != std::string::npos &&
-                                    candidate.find("\"full_name\"") != std::string::npos &&
-                                    candidate.find(username) != std::string::npos) {
-                                    try {
-                                        json test = json::parse(candidate);
-                                        // Found valid JSON with profile data
-                                        body = candidate;
-                                        break;
-                                    } catch (...) {}
-                                }
-                            }
-                            // Try the next outer brace
-                            if (bracePos == 0) break;
-                            bracePos = html.rfind('{', bracePos - 1);
-                        }
-                        pos += searchKey.size();
+            if (!gqlResp.empty() && gqlResp[0] == '{') {
+                try {
+                    json gql = json::parse(gqlResp);
+                    if (gql.contains("data") && gql["data"].contains("user") &&
+                        !gql["data"]["user"].is_null()) {
+                        body = gql.dump();
                     }
-                }
-
-                // Pattern 3: search all <script> tags for JSON containing the target username + profile fields
-                if (body.empty() || body[0] != '{') {
-                    std::string scriptStart = "<script type=\"application/json\"";
-                    size_t pos = 0;
-                    while ((pos = html.find(scriptStart, pos)) != std::string::npos) {
-                        size_t contentStart = html.find('>', pos);
-                        if (contentStart == std::string::npos) break;
-                        contentStart++;
-                        size_t contentEnd = html.find("</script>", contentStart);
-                        if (contentEnd == std::string::npos) break;
-
-                        std::string scriptContent = html.substr(contentStart, contentEnd - contentStart);
-                        if (scriptContent.find(username) != std::string::npos &&
-                            scriptContent.find("biography") != std::string::npos) {
-                            try {
-                                json scriptJson = json::parse(scriptContent);
-                                // Recursively search for user object
-                                std::function<json(const json&)> findUser = [&](const json& j) -> json {
-                                    if (j.is_object()) {
-                                        if (j.contains("username") && j.contains("biography") &&
-                                            j.value("username", "") == username)
-                                            return j;
-                                        for (auto& [k, v] : j.items()) {
-                                            json result = findUser(v);
-                                            if (!result.is_null()) return result;
-                                        }
-                                    } else if (j.is_array()) {
-                                        for (auto& elem : j) {
-                                            json result = findUser(elem);
-                                            if (!result.is_null()) return result;
-                                        }
-                                    }
-                                    return json();
-                                };
-                                json userObj = findUser(scriptJson);
-                                if (!userObj.is_null()) {
-                                    body = "{\"user\":" + userObj.dump() + "}";
-                                    break;
-                                }
-                            } catch (...) {}
-                        }
-                        pos = contentEnd;
-                    }
-                }
-
-                // Debug: if still no data, show what script data-content-len we see
-                if (body.empty() || body[0] != '{') {
-                    std::cerr << "[DBG] HTML markers found:" << std::endl;
-                    std::cerr << "  _sharedData: " << (html.find("_sharedData") != std::string::npos ? "yes" : "no") << std::endl;
-                    std::cerr << "  biography: " << (html.find("biography") != std::string::npos ? "yes" : "no") << std::endl;
-                    std::cerr << "  full_name: " << (html.find("full_name") != std::string::npos ? "yes" : "no") << std::endl;
-                    std::cerr << "  " << username << ": " << (html.find(username) != std::string::npos ? "yes" : "no") << std::endl;
-                    std::cerr << "  application/json: " << (html.find("application/json") != std::string::npos ? "yes" : "no") << std::endl;
-
-                    // Show nearby context around the username if found
-                    size_t upos = html.find(username);
-                    if (upos != std::string::npos) {
-                        size_t ctxStart = (upos > 100) ? upos - 100 : 0;
-                        size_t ctxLen = std::min<size_t>(300, html.size() - ctxStart);
-                        std::cerr << "  context: ..." << html.substr(ctxStart, ctxLen) << "..." << std::endl;
-                    }
-                }
+                } catch (...) {}
             }
         }
 
