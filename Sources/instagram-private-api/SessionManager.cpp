@@ -8,242 +8,544 @@
 #include <iomanip>
 #include <chrono>
 
+// OpenSSL for password encryption
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+#include <openssl/err.h>
+
 namespace IG {
 
     const std::string SessionManager::API_BASE = "https://i.instagram.com/api/v1";
-    const std::string SessionManager::WEB_BASE = "https://www.instagram.com";
+    const std::string SessionManager::WEB_BASE  = "https://www.instagram.com";
     const std::string SessionManager::IG_APP_ID = "936619743392459";
-    const std::string SessionManager::IG_SIG_KEY_VERSION = "4";
 
+    // -------------------------------------------------------------------------
+    // Singleton
+    // -------------------------------------------------------------------------
     SessionManager& SessionManager::Instance() {
         static SessionManager instance;
         return instance;
     }
 
+    // -------------------------------------------------------------------------
+    // Device / headers
+    // -------------------------------------------------------------------------
     std::string SessionManager::BuildUserAgent() const {
         return "Instagram 275.0.0.27.98 Android (33/13; 440dpi; 1080x2400; "
                "Google/google; Pixel 7; panther; tensor; en_US; 458229258)";
     }
 
     Headers SessionManager::BuildCommonHeaders() const {
-        Headers headers;
-        headers.emplace_back("User-Agent", BuildUserAgent());
-        headers.emplace_back("X-IG-App-ID", IG_APP_ID);
-        headers.emplace_back("X-IG-App-Locale", "en_US");
-        headers.emplace_back("X-IG-Device-Locale", "en_US");
-        headers.emplace_back("X-IG-Connection-Type", "WIFI");
-        headers.emplace_back("X-IG-Capabilities", "3brTvx0=");
-        headers.emplace_back("Accept-Language", "en-US");
-        headers.emplace_back("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
-        headers.emplace_back("Accept", "*/*");
-        headers.emplace_back("X-IG-Connection-Speed", "1000kbps");
-        headers.emplace_back("X-IG-Bandwidth-Speed-KBPS", "1000.000");
-        headers.emplace_back("X-IG-Bandwidth-TotalBytes-B", "0");
-        headers.emplace_back("X-IG-Bandwidth-TotalTime-MS", "0");
-        return headers;
+        Headers h;
+        h.emplace_back("User-Agent",                  BuildUserAgent());
+        h.emplace_back("X-IG-App-ID",                 IG_APP_ID);
+        h.emplace_back("X-IG-App-Locale",             "en_US");
+        h.emplace_back("X-IG-Device-Locale",          "en_US");
+        h.emplace_back("X-IG-Connection-Type",        "WIFI");
+        h.emplace_back("X-IG-Capabilities",           "3brTvx0=");
+        h.emplace_back("Accept-Language",             "en-US");
+        h.emplace_back("Content-Type",                "application/x-www-form-urlencoded; charset=UTF-8");
+        h.emplace_back("Accept",                      "*/*");
+        h.emplace_back("X-IG-Connection-Speed",       "1000kbps");
+        h.emplace_back("X-IG-Bandwidth-Speed-KBPS",  "1000.000");
+        h.emplace_back("X-IG-Bandwidth-TotalBytes-B", "0");
+        h.emplace_back("X-IG-Bandwidth-TotalTime-MS", "0");
+        return h;
     }
 
-    std::string SessionManager::ExtractCookieValue(const std::string& cookieHeader, const std::string& name) {
+    // -------------------------------------------------------------------------
+    // Cookie helpers
+    // -------------------------------------------------------------------------
+    std::string SessionManager::ExtractCookieValue(const std::string& hdr, const std::string& name) {
         std::string search = name + "=";
-        size_t pos = cookieHeader.find(search);
+        size_t pos = hdr.find(search);
         if (pos == std::string::npos) return "";
-
-        pos += search.length();
-        size_t end = cookieHeader.find(';', pos);
-        if (end == std::string::npos)
-            return cookieHeader.substr(pos);
-        return cookieHeader.substr(pos, end - pos);
+        pos += search.size();
+        size_t end = hdr.find(';', pos);
+        return (end == std::string::npos) ? hdr.substr(pos) : hdr.substr(pos, end - pos);
     }
 
-    void SessionManager::ParseLoginCookies(const Headers& responseHeaders) {
-        for (const auto& [key, value] : responseHeaders) {
-            std::string lowerKey = key;
-            std::transform(lowerKey.begin(), lowerKey.end(), lowerKey.begin(), ::tolower);
-            if (lowerKey != "set-cookie") continue;
+    void SessionManager::ParseLoginCookies(const Headers& respHeaders) {
+        for (const auto& [key, value] : respHeaders) {
+            std::string lk = key;
+            std::transform(lk.begin(), lk.end(), lk.begin(), ::tolower);
+            if (lk != "set-cookie") continue;
 
-            std::string sessionId = ExtractCookieValue(value, "sessionid");
-            if (!sessionId.empty()) _currentUser.sessionId = sessionId;
-
-            std::string csrfToken = ExtractCookieValue(value, "csrftoken");
-            if (!csrfToken.empty()) _currentUser.csrfToken = csrfToken;
-
-            std::string mid = ExtractCookieValue(value, "mid");
-            if (!mid.empty()) _currentUser.mid = mid;
-
-            std::string dsUserId = ExtractCookieValue(value, "ds_user_id");
-            if (!dsUserId.empty()) _currentUser.dsUserId = dsUserId;
+            auto try_set = [&](const std::string& n, std::string& dst) {
+                std::string v = ExtractCookieValue(value, n);
+                if (!v.empty()) dst = v;
+            };
+            try_set("sessionid",  _currentUser.sessionId);
+            try_set("csrftoken",  _currentUser.csrfToken);
+            try_set("mid",        _currentUser.mid);
+            try_set("ds_user_id", _currentUser.dsUserId);
         }
     }
 
+    // -------------------------------------------------------------------------
+    // HTTP helpers
+    // -------------------------------------------------------------------------
     ResponseData SessionManager::MakeAuthenticatedRequest(const std::string& url,
-                                                           RequestMethod method,
-                                                           const std::string& body) {
+                                                          RequestMethod method,
+                                                          const std::string& body) {
         RequestData req;
-        req.url = url;
-        req.method = method;
+        req.url     = url;
+        req.method  = method;
         req.headers = BuildCommonHeaders();
 
-        // Add auth cookies
-        std::string cookies = "sessionid=" + _currentUser.sessionId +
-                              "; csrftoken=" + _currentUser.csrfToken +
-                              "; ds_user_id=" + _currentUser.dsUserId;
+        std::string cookies = "sessionid=" + _currentUser.sessionId
+                            + "; csrftoken=" + _currentUser.csrfToken
+                            + "; ds_user_id=" + _currentUser.dsUserId;
         if (!_currentUser.mid.empty())
             cookies += "; mid=" + _currentUser.mid;
 
-        req.headers.emplace_back("Cookie", cookies);
+        req.headers.emplace_back("Cookie",      cookies);
         req.headers.emplace_back("X-CSRFToken", _currentUser.csrfToken);
-
-        if (!body.empty())
-            req.body = ByteData(body);
+        if (!body.empty()) req.body = ByteData(body);
 
         req.connTimeoutMillis = 30000;
         req.readTimeoutMillis = 30000;
-        req.followRedirects = true;
-        req.verifySSL = true;
-
+        req.followRedirects   = true;
+        req.verifySSL         = true;
         return CreateRequest(req);
     }
 
     ResponseData SessionManager::MakePublicRequest(const std::string& url) {
         RequestData req;
-        req.url = url;
-        req.method = RequestMethod::REQ_GET;
-        req.headers = BuildCommonHeaders();
+        req.url             = url;
+        req.method          = RequestMethod::REQ_GET;
+        req.headers         = BuildCommonHeaders();
         req.connTimeoutMillis = 30000;
         req.readTimeoutMillis = 30000;
         req.followRedirects = true;
-        req.verifySSL = true;
-
+        req.verifySSL       = true;
         return CreateRequest(req);
     }
 
+    // -------------------------------------------------------------------------
+    // Password encryption  (Instagram enc_password format)
+    // Returns "#PWD_INSTAGRAM:4:<timestamp>:<base64>"
+    // The pubKey and keyId are taken from Instagram's fetch_headers response.
+    // -------------------------------------------------------------------------
+    static std::string base64Encode(const unsigned char* data, size_t len) {
+        BIO* b64 = BIO_new(BIO_f_base64());
+        BIO* mem = BIO_new(BIO_s_mem());
+        b64 = BIO_push(b64, mem);
+        BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+        BIO_write(b64, data, static_cast<int>(len));
+        BIO_flush(b64);
+        BUF_MEM* bptr = nullptr;
+        BIO_get_mem_ptr(b64, &bptr);
+        std::string out(bptr->data, bptr->length);
+        BIO_free_all(b64);
+        return out;
+    }
+
+    static std::string encryptPasswordForIG(const std::string& password,
+                                             const std::string& pubKeyB64,
+                                             int keyId) {
+        // Decode the public key (it comes as base64 from Instagram)
+        std::string decodedKey;
+        {
+            BIO* b64 = BIO_new(BIO_f_base64());
+            BIO* mem = BIO_new_mem_buf(pubKeyB64.data(), static_cast<int>(pubKeyB64.size()));
+            b64 = BIO_push(b64, mem);
+            BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+            decodedKey.resize(pubKeyB64.size());
+            int len = BIO_read(b64, decodedKey.data(), static_cast<int>(decodedKey.size()));
+            decodedKey.resize(std::max(len, 0));
+            BIO_free_all(b64);
+        }
+
+        // Load public key
+        BIO* bio = BIO_new_mem_buf(decodedKey.data(), static_cast<int>(decodedKey.size()));
+        EVP_PKEY* pubKey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+        BIO_free(bio);
+        if (!pubKey) throw std::runtime_error("Failed to load Instagram public key");
+
+        // Generate random AES-256 key and 12-byte IV
+        unsigned char aesKey[32], iv[12];
+        if (!RAND_bytes(aesKey, sizeof(aesKey)) || !RAND_bytes(iv, sizeof(iv))) {
+            EVP_PKEY_free(pubKey);
+            throw std::runtime_error("Failed to generate random bytes");
+        }
+
+        // RSA-encrypt the AES key
+        EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pubKey, nullptr);
+        EVP_PKEY_free(pubKey);
+        if (!ctx) throw std::runtime_error("EVP_PKEY_CTX_new failed");
+
+        if (EVP_PKEY_encrypt_init(ctx) <= 0 ||
+            EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            throw std::runtime_error("RSA init failed");
+        }
+
+        size_t rsaLen = 0;
+        EVP_PKEY_encrypt(ctx, nullptr, &rsaLen, aesKey, sizeof(aesKey));
+        std::vector<unsigned char> rsaEncrypted(rsaLen);
+        if (EVP_PKEY_encrypt(ctx, rsaEncrypted.data(), &rsaLen, aesKey, sizeof(aesKey)) <= 0) {
+            EVP_PKEY_CTX_free(ctx);
+            throw std::runtime_error("RSA encryption failed");
+        }
+        rsaEncrypted.resize(rsaLen);
+        EVP_PKEY_CTX_free(ctx);
+
+        // AES-256-GCM encrypt the password using timestamp as AAD
+        std::string timestamp = std::to_string(std::time(nullptr));
+        EVP_CIPHER_CTX* aesCtx = EVP_CIPHER_CTX_new();
+        std::vector<unsigned char> ciphertext(password.size() + 16);
+        unsigned char tag[16];
+        int len = 0, totalLen = 0;
+
+        if (!EVP_EncryptInit_ex(aesCtx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) ||
+            !EVP_CIPHER_CTX_ctrl(aesCtx, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), nullptr) ||
+            !EVP_EncryptInit_ex(aesCtx, nullptr, nullptr, aesKey, iv) ||
+            !EVP_EncryptUpdate(aesCtx, nullptr, &len,
+                               reinterpret_cast<const unsigned char*>(timestamp.c_str()),
+                               static_cast<int>(timestamp.size())) ||
+            !EVP_EncryptUpdate(aesCtx, ciphertext.data(), &len,
+                               reinterpret_cast<const unsigned char*>(password.c_str()),
+                               static_cast<int>(password.size()))) {
+            EVP_CIPHER_CTX_free(aesCtx);
+            throw std::runtime_error("AES-GCM encryption failed");
+        }
+        totalLen = len;
+        EVP_EncryptFinal_ex(aesCtx, ciphertext.data() + len, &len);
+        totalLen += len;
+        ciphertext.resize(totalLen);
+        EVP_CIPHER_CTX_ctrl(aesCtx, EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag);
+        EVP_CIPHER_CTX_free(aesCtx);
+
+        // Build final payload: [1][keyId][iv(12)][rsaLen_lo][rsaLen_hi][rsaEncrypted][tag(16)][ciphertext]
+        std::vector<unsigned char> payload;
+        payload.push_back(1);
+        payload.push_back(static_cast<unsigned char>(keyId));
+        payload.insert(payload.end(), iv, iv + sizeof(iv));
+        payload.push_back(static_cast<unsigned char>(rsaLen & 0xFF));
+        payload.push_back(static_cast<unsigned char>((rsaLen >> 8) & 0xFF));
+        payload.insert(payload.end(), rsaEncrypted.begin(), rsaEncrypted.end());
+        payload.insert(payload.end(), tag, tag + sizeof(tag));
+        payload.insert(payload.end(), ciphertext.begin(), ciphertext.end());
+
+        std::string b64 = base64Encode(payload.data(), payload.size());
+        return "#PWD_INSTAGRAM:4:" + timestamp + ":" + b64;
+    }
+
+    // -------------------------------------------------------------------------
+    // URL-encode a single value
+    // -------------------------------------------------------------------------
+    static std::string urlEncode(const std::string& s) {
+        std::ostringstream out;
+        for (unsigned char c : s) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+                out << c;
+            else
+                out << '%' << std::uppercase << std::setw(2) << std::setfill('0') << std::hex << (int)c;
+        }
+        return out.str();
+    }
+
+    // -------------------------------------------------------------------------
+    // Build a UUID-like device identifier from a seed string
+    // -------------------------------------------------------------------------
+    static std::string makeDeviceId(const std::string& seed) {
+        // Simple deterministic "device id" based on username
+        std::hash<std::string> hasher;
+        size_t h = hasher(seed + "osintgramcxx");
+        std::ostringstream oss;
+        oss << "android-" << std::hex << std::setw(16) << std::setfill('0') << h;
+        return oss.str().substr(0, 24);
+    }
+
+    static std::string makeGuid(const std::string& seed) {
+        std::hash<std::string> hasher;
+        size_t h1 = hasher(seed + "guid1");
+        size_t h2 = hasher(seed + "guid2");
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0')
+            << std::setw(8) << (h1 & 0xFFFFFFFF) << "-"
+            << std::setw(4) << ((h1 >> 32) & 0xFFFF) << "-"
+            << std::setw(4) << ((h2 & 0x0FFF) | 0x4000) << "-"
+            << std::setw(4) << ((h2 >> 16 & 0x3FFF) | 0x8000) << "-"
+            << std::setw(12) << (h2 & 0xFFFFFFFFFFFF);
+        return oss.str();
+    }
+
+    // -------------------------------------------------------------------------
+    // Login
+    // -------------------------------------------------------------------------
     bool SessionManager::Login(const std::string& username, const std::string& password) {
         std::lock_guard<std::mutex> lock(_mutex);
 
-        _currentUser = UserSession{};
-        _currentUser.username = username;
+        _currentUser         = UserSession{};
+        _currentUser.username  = username;
         _currentUser.userAgent = BuildUserAgent();
 
-        // Step 1: Fetch CSRF token from accounts/login page
-        {
-            RequestData csrfReq;
-            csrfReq.url = API_BASE + "/si/fetch_headers/?challenge_type=signup&guid=generate";
-            csrfReq.method = RequestMethod::REQ_GET;
-            csrfReq.headers = BuildCommonHeaders();
-            csrfReq.connTimeoutMillis = 30000;
-            csrfReq.readTimeoutMillis = 30000;
-            csrfReq.followRedirects = true;
-            csrfReq.verifySSL = true;
+        std::string deviceId = makeDeviceId(username);
+        std::string guid     = makeGuid(username);
+        std::string phoneId  = makeGuid(username + "phone");
 
-            ResponseData csrfResp = CreateRequest(csrfReq);
-            ParseLoginCookies(csrfResp.headers);
+        // ------------------------------------------------------------------
+        // Step 1: fetch_headers  →  get CSRF token + encryption key
+        // ------------------------------------------------------------------
+        std::string encPubKey;
+        int         encKeyId = 0;
+
+        {
+            RequestData req;
+            req.url     = API_BASE + "/si/fetch_headers/?challenge_type=signup&guid=" + guid;
+            req.method  = RequestMethod::REQ_GET;
+            req.headers = BuildCommonHeaders();
+            req.connTimeoutMillis = 15000;
+            req.readTimeoutMillis = 15000;
+            req.followRedirects   = true;
+            req.verifySSL         = true;
+
+            ResponseData resp = CreateRequest(req);
+            ParseLoginCookies(resp.headers);
+
+            // Look for encryption key headers
+            for (const auto& [k, v] : resp.headers) {
+                std::string lk = k;
+                std::transform(lk.begin(), lk.end(), lk.begin(), ::tolower);
+                if (lk == "ig-set-password-encryption-pub-key")  encPubKey = v;
+                if (lk == "ig-set-password-encryption-key-id")   encKeyId  = std::stoi(v);
+            }
         }
 
-        // Step 2: Perform login
-        std::string timestamp = std::to_string(std::time(nullptr));
-
-        std::ostringstream loginBody;
-        loginBody << "signed_body=SIGNATURE."
-                  << "%7B"
-                  << "%22phone_id%22%3A%22" << "a1b2c3d4-e5f6-7890-abcd-ef1234567890" << "%22%2C"
-                  << "%22_csrftoken%22%3A%22" << _currentUser.csrfToken << "%22%2C"
-                  << "%22username%22%3A%22" << username << "%22%2C"
-                  << "%22guid%22%3A%22" << "a1b2c3d4-e5f6-7890-abcd-ef1234567890" << "%22%2C"
-                  << "%22device_id%22%3A%22" << "android-a1b2c3d4e5f67890" << "%22%2C"
-                  << "%22password%22%3A%22" << password << "%22%2C"
-                  << "%22login_attempt_count%22%3A%220%22"
-                  << "%7D"
-                  << "&ig_sig_key_version=" << IG_SIG_KEY_VERSION;
-
-        RequestData loginReq;
-        loginReq.url = API_BASE + "/accounts/login/";
-        loginReq.method = RequestMethod::REQ_POST;
-        loginReq.headers = BuildCommonHeaders();
-        loginReq.body = ByteData(loginBody.str());
-        loginReq.connTimeoutMillis = 30000;
-        loginReq.readTimeoutMillis = 30000;
-        loginReq.followRedirects = true;
-        loginReq.verifySSL = true;
-
-        ResponseData loginResp = CreateRequest(loginReq);
-
-        // Parse cookies from response
-        ParseLoginCookies(loginResp.headers);
-
-        // Parse JSON response
-        try {
-            std::string respBody = std::get<ByteData>(loginResp.body);
-            json respJson = json::parse(respBody);
-
-            if (respJson.contains("logged_in_user")) {
-                auto& user = respJson["logged_in_user"];
-                _currentUser.userId = std::to_string(user.value("pk", 0L));
-                _currentUser.authenticated = true;
-
-                // Build auth headers for future requests
-                _currentUser.authHeaders.emplace_back("Cookie",
-                    "sessionid=" + _currentUser.sessionId +
-                    "; csrftoken=" + _currentUser.csrfToken +
-                    "; ds_user_id=" + _currentUser.dsUserId);
-                _currentUser.authHeaders.emplace_back("X-CSRFToken", _currentUser.csrfToken);
-
-                return true;
-            }
-
-            if (respJson.contains("two_factor_required") && respJson["two_factor_required"].get<bool>()) {
-                std::cerr << "[!] Two-factor authentication required." << std::endl;
-                std::cerr << "[!] 2FA support is not yet fully implemented." << std::endl;
-                std::cerr << "[!] Please disable 2FA temporarily or use an app password." << std::endl;
+        // ------------------------------------------------------------------
+        // Step 2: encrypt password
+        // ------------------------------------------------------------------
+        std::string encPassword;
+        if (!encPubKey.empty() && encKeyId > 0) {
+            try {
+                encPassword = encryptPasswordForIG(password, encPubKey, encKeyId);
+            } catch (const std::exception& e) {
+                std::cerr << "[!] Password encryption failed: " << e.what() << std::endl;
                 return false;
             }
+        } else {
+            // Fallback: send plain (Instagram will likely reject, but we surface the error)
+            std::cerr << "[!] Warning: could not retrieve Instagram encryption key. "
+                      << "Sending password without encryption." << std::endl;
+            encPassword = "#PWD_INSTAGRAM:0:0:" + password;
+        }
 
-            if (respJson.contains("message")) {
-                std::cerr << "[!] Login failed: " << respJson["message"].get<std::string>() << std::endl;
-            }
+        // ------------------------------------------------------------------
+        // Step 3: POST login
+        // ------------------------------------------------------------------
+        std::string csrfToken = _currentUser.csrfToken.empty() ? "missing" : _currentUser.csrfToken;
 
-            if (respJson.contains("error_type")) {
-                std::string errorType = respJson["error_type"].get<std::string>();
-                if (errorType == "bad_password") {
-                    std::cerr << "[!] Incorrect password for user '" << username << "'" << std::endl;
-                } else if (errorType == "invalid_user") {
-                    std::cerr << "[!] User '" << username << "' not found" << std::endl;
-                } else if (errorType == "checkpoint_challenge_required") {
-                    std::cerr << "[!] Challenge required. Instagram needs identity verification." << std::endl;
-                    std::cerr << "[!] Please log in via the Instagram app first to clear the challenge." << std::endl;
-                }
-            }
+        std::string body =
+            "username="           + urlEncode(username)     +
+            "&enc_password="      + urlEncode(encPassword)  +
+            "&device_id="         + urlEncode(deviceId)     +
+            "&guid="              + urlEncode(guid)         +
+            "&phone_id="          + urlEncode(phoneId)      +
+            "&_csrftoken="        + urlEncode(csrfToken)    +
+            "&login_attempt_count=0"                        +
+            "&_uuid="             + urlEncode(guid);
 
-        } catch (const json::exception& e) {
-            std::cerr << "[!] Failed to parse login response: " << e.what() << std::endl;
+        RequestData loginReq;
+        loginReq.url     = API_BASE + "/accounts/login/";
+        loginReq.method  = RequestMethod::REQ_POST;
+        loginReq.headers = BuildCommonHeaders();
+        if (!csrfToken.empty())
+            loginReq.headers.emplace_back("X-CSRFToken", csrfToken);
+        loginReq.body             = ByteData(body);
+        loginReq.connTimeoutMillis = 30000;
+        loginReq.readTimeoutMillis = 30000;
+        loginReq.followRedirects  = true;
+        loginReq.verifySSL        = true;
 
-            // If we got a session ID from cookies, login may have succeeded
-            if (!_currentUser.sessionId.empty() && !_currentUser.dsUserId.empty()) {
-                _currentUser.userId = _currentUser.dsUserId;
+        ResponseData loginResp = CreateRequest(loginReq);
+        ParseLoginCookies(loginResp.headers);
+
+        // ------------------------------------------------------------------
+        // Step 4: parse response
+        // ------------------------------------------------------------------
+        std::string rawBody;
+        try { rawBody = std::get<ByteData>(loginResp.body); } catch (...) {}
+
+        if (loginResp.statusCode == 0 || !loginResp.errorData.empty()) {
+            std::cerr << "[!] Network error: " << loginResp.errorData << std::endl;
+            return false;
+        }
+
+        // Try JSON parse
+        json respJson;
+        try {
+            respJson = json::parse(rawBody);
+        } catch (...) {
+            std::cerr << "[!] Instagram returned a non-JSON response (HTTP "
+                      << loginResp.statusCode << ")" << std::endl;
+            // If we somehow got cookies, treat as success
+            if (!_currentUser.sessionId.empty()) {
+                _currentUser.userId        = _currentUser.dsUserId;
                 _currentUser.authenticated = true;
                 return true;
             }
+            return false;
         }
+
+        // Successful login
+        if (respJson.contains("logged_in_user")) {
+            auto& u = respJson["logged_in_user"];
+            if (u.contains("pk_id"))
+                _currentUser.userId = u["pk_id"].is_string()
+                    ? u["pk_id"].get<std::string>()
+                    : std::to_string(u.value("pk_id", 0LL));
+            else
+                _currentUser.userId = std::to_string(u.value("pk", 0LL));
+            _currentUser.authenticated = true;
+            return true;
+        }
+
+        // 2FA required
+        if (respJson.value("two_factor_required", false)) {
+            return Handle2FA(respJson, username, deviceId, guid, csrfToken);
+        }
+
+        // Error messages
+        std::string errType = respJson.value("error_type", "");
+        std::string msg     = respJson.value("message", "");
+
+        if (errType == "bad_password")
+            std::cerr << "[!] Incorrect password." << std::endl;
+        else if (errType == "invalid_user")
+            std::cerr << "[!] User '" << username << "' not found." << std::endl;
+        else if (errType == "checkpoint_challenge_required")
+            std::cerr << "[!] Instagram requires identity verification (challenge).\n"
+                      << "[!] Open the Instagram app and approve the login, then retry." << std::endl;
+        else if (!msg.empty())
+            std::cerr << "[!] Login failed: " << msg << std::endl;
+        else
+            std::cerr << "[!] Login failed (HTTP " << loginResp.statusCode << ")" << std::endl;
 
         return false;
     }
 
-    void SessionManager::Logout() {
-        std::lock_guard<std::mutex> lock(_mutex);
+    // -------------------------------------------------------------------------
+    // 2FA handler
+    // -------------------------------------------------------------------------
+    bool SessionManager::Handle2FA(const json& initialResp,
+                                   const std::string& username,
+                                   const std::string& deviceId,
+                                   const std::string& guid,
+                                   const std::string& csrfToken) {
+        std::string identifier;
+        std::string twoFactorMethod;
 
-        if (_currentUser.authenticated) {
-            // Send logout request
-            try {
-                MakeAuthenticatedRequest(API_BASE + "/accounts/logout/", RequestMethod::REQ_POST);
-            } catch (...) {
-                // Best-effort logout
-            }
+        if (initialResp.contains("two_factor_info")) {
+            const auto& info = initialResp["two_factor_info"];
+            identifier       = info.value("two_factor_identifier", "");
+            // 1 = SMS, 3 = TOTP app
+            int method = info.value("totp_two_factor_on", false) ? 3 : 1;
+            twoFactorMethod  = std::to_string(method);
         }
 
-        _currentUser = UserSession{};
-        _currentTarget = TargetInfo{};
-        _hasTarget = false;
+        std::cout << std::endl;
+        std::cout << "[*] Two-factor authentication required." << std::endl;
+
+        bool isTOTP = (twoFactorMethod == "3");
+        if (isTOTP)
+            std::cout << "[*] Method: Authenticator app (TOTP)" << std::endl;
+        else
+            std::cout << "[*] Method: SMS" << std::endl;
+
+        std::cout << "[*] Enter your 2FA code: ";
+        std::cout.flush();
+
+        std::string code;
+        std::getline(std::cin, code);
+
+        // Strip spaces/dashes from code
+        code.erase(std::remove_if(code.begin(), code.end(),
+                   [](char c){ return c == ' ' || c == '-'; }), code.end());
+
+        if (code.empty()) {
+            std::cerr << "[!] No code entered, login cancelled." << std::endl;
+            return false;
+        }
+
+        // POST two_factor_login
+        std::string body =
+            "username="               + urlEncode(username)         +
+            "&verificationCode="      + urlEncode(code)             +
+            "&two_factor_identifier=" + urlEncode(identifier)       +
+            "&_csrftoken="            + urlEncode(csrfToken)        +
+            "&trust_this_device=0"                                   +
+            "&guid="                  + urlEncode(guid)             +
+            "&device_id="             + urlEncode(deviceId)         +
+            "&verification_method="   + urlEncode(twoFactorMethod);
+
+        RequestData req;
+        req.url     = API_BASE + "/accounts/two_factor_login/";
+        req.method  = RequestMethod::REQ_POST;
+        req.headers = BuildCommonHeaders();
+        req.headers.emplace_back("X-CSRFToken", csrfToken);
+        req.body              = ByteData(body);
+        req.connTimeoutMillis = 30000;
+        req.readTimeoutMillis = 30000;
+        req.followRedirects   = true;
+        req.verifySSL         = true;
+
+        // Add cookies we have so far
+        std::string cookies = "csrftoken=" + _currentUser.csrfToken;
+        if (!_currentUser.mid.empty()) cookies += "; mid=" + _currentUser.mid;
+        req.headers.emplace_back("Cookie", cookies);
+
+        ResponseData resp = CreateRequest(req);
+        ParseLoginCookies(resp.headers);
+
+        std::string rawBody;
+        try { rawBody = std::get<ByteData>(resp.body); } catch (...) {}
+
+        json respJson;
+        try { respJson = json::parse(rawBody); } catch (...) {
+            std::cerr << "[!] Non-JSON response from 2FA endpoint." << std::endl;
+            return false;
+        }
+
+        if (respJson.contains("logged_in_user")) {
+            auto& u = respJson["logged_in_user"];
+            _currentUser.userId = std::to_string(u.value("pk", 0LL));
+            _currentUser.authenticated = true;
+            std::cout << "[+] 2FA verified successfully." << std::endl;
+            return true;
+        }
+
+        std::string errType = respJson.value("error_type", "");
+        if (errType == "two_factor_required")
+            std::cerr << "[!] Invalid or expired 2FA code." << std::endl;
+        else
+            std::cerr << "[!] 2FA failed: " << respJson.value("message", "unknown error") << std::endl;
+
+        return false;
     }
 
+    // -------------------------------------------------------------------------
+    // Logout
+    // -------------------------------------------------------------------------
+    void SessionManager::Logout() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_currentUser.authenticated) {
+            try { MakeAuthenticatedRequest(API_BASE + "/accounts/logout/", RequestMethod::REQ_POST); }
+            catch (...) {}
+        }
+        _currentUser  = UserSession{};
+        _currentTarget = TargetInfo{};
+        _hasTarget    = false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Session state accessors
+    // -------------------------------------------------------------------------
     bool SessionManager::IsLoggedIn() const {
         std::lock_guard<std::mutex> lock(_mutex);
         return _currentUser.authenticated;
@@ -259,13 +561,15 @@ namespace IG {
         return _currentUser;
     }
 
+    // -------------------------------------------------------------------------
+    // Target management
+    // -------------------------------------------------------------------------
     bool SessionManager::SetTarget(const std::string& username) {
         auto info = FetchUserInfo(username);
         if (!info.has_value()) return false;
-
         std::lock_guard<std::mutex> lock(_mutex);
         _currentTarget = info.value();
-        _hasTarget = true;
+        _hasTarget     = true;
         return true;
     }
 
@@ -284,16 +588,16 @@ namespace IG {
         return _currentTarget.username;
     }
 
+    // -------------------------------------------------------------------------
+    // Fetch user info
+    // -------------------------------------------------------------------------
     std::optional<TargetInfo> SessionManager::FetchUserInfo(const std::string& username) {
-        // First search for the user to get their ID
-        std::string searchUrl = API_BASE + "/users/search/?q=" + username +
-                                "&count=1&timezone_offset=0";
+        std::string searchUrl = API_BASE + "/users/search/?q=" + username
+                              + "&count=1&timezone_offset=0";
 
-        ResponseData searchResp;
-        if (_currentUser.authenticated)
-            searchResp = MakeAuthenticatedRequest(searchUrl);
-        else
-            searchResp = MakePublicRequest(searchUrl);
+        ResponseData searchResp = _currentUser.authenticated
+            ? MakeAuthenticatedRequest(searchUrl)
+            : MakePublicRequest(searchUrl);
 
         if (searchResp.statusCode != 200) {
             std::cerr << "[!] Failed to search for user '" << username
@@ -302,81 +606,57 @@ namespace IG {
         }
 
         try {
-            std::string body = std::get<ByteData>(searchResp.body);
-            json searchJson = json::parse(body);
+            json searchJson = json::parse(std::get<ByteData>(searchResp.body));
 
             if (!searchJson.contains("users") || searchJson["users"].empty()) {
-                std::cerr << "[!] User '" << username << "' not found" << std::endl;
+                std::cerr << "[!] User '" << username << "' not found." << std::endl;
                 return std::nullopt;
             }
 
-            // Find exact username match
             json targetUser;
             bool found = false;
             for (const auto& u : searchJson["users"]) {
-                if (u.value("username", "") == username) {
-                    targetUser = u;
-                    found = true;
-                    break;
-                }
+                if (u.value("username", "") == username) { targetUser = u; found = true; break; }
             }
+            if (!found) targetUser = searchJson["users"][0];
 
-            if (!found) {
-                // Use first result as fallback
-                targetUser = searchJson["users"][0];
-            }
+            std::string userId = std::to_string(targetUser.value("pk", 0LL));
 
-            std::string userId = std::to_string(targetUser.value("pk", 0L));
-
-            // Fetch detailed user info
+            // Fetch detailed info
             std::string infoUrl = API_BASE + "/users/" + userId + "/info/";
-            ResponseData infoResp;
-            if (_currentUser.authenticated)
-                infoResp = MakeAuthenticatedRequest(infoUrl);
-            else
-                infoResp = MakePublicRequest(infoUrl);
+            ResponseData infoResp = _currentUser.authenticated
+                ? MakeAuthenticatedRequest(infoUrl)
+                : MakePublicRequest(infoUrl);
 
             TargetInfo info;
             info.username = username;
-            info.userId = userId;
+            info.userId   = userId;
 
             if (infoResp.statusCode == 200) {
-                std::string infoBody = std::get<ByteData>(infoResp.body);
-                json infoJson = json::parse(infoBody);
-
-                if (infoJson.contains("user")) {
-                    auto& user = infoJson["user"];
-                    info.fullName = user.value("full_name", "");
-                    info.biography = user.value("biography", "");
-                    info.externalUrl = user.value("external_url", "");
-                    info.profilePicUrl = user.value("profile_pic_url", "");
-                    info.profilePicUrlHD = user.value("hd_profile_pic_url_info",
-                                           json::object()).value("url", info.profilePicUrl);
-                    info.followerCount = user.value("follower_count", 0);
-                    info.followingCount = user.value("following_count", 0);
-                    info.mediaCount = user.value("media_count", 0);
-                    info.isPrivate = user.value("is_private", false);
-                    info.isVerified = user.value("is_verified", false);
-                    info.isBusiness = user.value("is_business", false);
-                    info.category = user.value("category", "");
-
-                    if (user.contains("public_email"))
-                        info.email = user.value("public_email", "");
-                    if (user.contains("public_phone_number"))
-                        info.phoneNumber = user.value("public_phone_number", "");
-
-                    // Try HD profile pic from nested structure
-                    if (user.contains("hd_profile_pic_url_info")) {
-                        auto& hdPic = user["hd_profile_pic_url_info"];
-                        info.profilePicUrlHD = hdPic.value("url", info.profilePicUrl);
-                    }
+                json ij = json::parse(std::get<ByteData>(infoResp.body));
+                if (ij.contains("user")) {
+                    auto& u = ij["user"];
+                    info.fullName      = u.value("full_name",       "");
+                    info.biography     = u.value("biography",       "");
+                    info.externalUrl   = u.value("external_url",    "");
+                    info.profilePicUrl = u.value("profile_pic_url", "");
+                    info.followerCount = u.value("follower_count",  0);
+                    info.followingCount= u.value("following_count", 0);
+                    info.mediaCount    = u.value("media_count",     0);
+                    info.isPrivate     = u.value("is_private",      false);
+                    info.isVerified    = u.value("is_verified",     false);
+                    info.isBusiness    = u.value("is_business",     false);
+                    info.category      = u.value("category",        "");
+                    info.email         = u.value("public_email",    "");
+                    info.phoneNumber   = u.value("public_phone_number", "");
+                    if (u.contains("hd_profile_pic_url_info"))
+                        info.profilePicUrlHD = u["hd_profile_pic_url_info"].value("url", info.profilePicUrl);
                 }
             } else {
-                // Use search result data as fallback
-                info.fullName = targetUser.value("full_name", "");
+                info.fullName      = targetUser.value("full_name",       "");
                 info.profilePicUrl = targetUser.value("profile_pic_url", "");
-                info.isPrivate = targetUser.value("is_private", false);
-                info.isVerified = targetUser.value("is_verified", false);
+                info.isPrivate     = targetUser.value("is_private",      false);
+                info.isVerified    = targetUser.value("is_verified",     false);
             }
 
             return info;
@@ -387,401 +667,270 @@ namespace IG {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Followers / Following
+    // -------------------------------------------------------------------------
     std::vector<UserEntry> SessionManager::FetchFollowers(const std::string& userId, int maxCount) {
-        std::vector<UserEntry> followers;
+        std::vector<UserEntry> results;
         std::string nextMaxId;
         int fetched = 0;
-
         while (fetched < maxCount) {
-            std::string url = API_BASE + "/friendships/" + userId + "/followers/"
-                              "?count=50&search_surface=follow_list_page";
-            if (!nextMaxId.empty())
-                url += "&max_id=" + nextMaxId;
-
+            std::string url = API_BASE + "/friendships/" + userId + "/followers/?count=50&search_surface=follow_list_page";
+            if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             if (resp.statusCode != 200) break;
-
             try {
-                std::string body = std::get<ByteData>(resp.body);
-                json data = json::parse(body);
-
+                json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("users")) break;
-
                 for (const auto& u : data["users"]) {
                     if (fetched >= maxCount) break;
-                    UserEntry entry;
-                    entry.username = u.value("username", "");
-                    entry.userId = std::to_string(u.value("pk", 0L));
-                    entry.fullName = u.value("full_name", "");
-                    entry.profilePicUrl = u.value("profile_pic_url", "");
-                    entry.isPrivate = u.value("is_private", false);
-                    entry.isVerified = u.value("is_verified", false);
-                    followers.push_back(entry);
+                    UserEntry e;
+                    e.username      = u.value("username",       "");
+                    e.userId        = std::to_string(u.value("pk", 0LL));
+                    e.fullName      = u.value("full_name",       "");
+                    e.profilePicUrl = u.value("profile_pic_url","");
+                    e.isPrivate     = u.value("is_private",      false);
+                    e.isVerified    = u.value("is_verified",     false);
+                    results.push_back(e);
                     fetched++;
                 }
-
                 if (data.contains("next_max_id") && !data["next_max_id"].is_null())
                     nextMaxId = data["next_max_id"].get<std::string>();
-                else
-                    break;
-
-            } catch (const json::exception&) {
-                break;
-            }
+                else break;
+            } catch (...) { break; }
         }
-
-        return followers;
+        return results;
     }
 
     std::vector<UserEntry> SessionManager::FetchFollowing(const std::string& userId, int maxCount) {
-        std::vector<UserEntry> following;
+        std::vector<UserEntry> results;
         std::string nextMaxId;
         int fetched = 0;
-
         while (fetched < maxCount) {
-            std::string url = API_BASE + "/friendships/" + userId + "/following/"
-                              "?count=50";
-            if (!nextMaxId.empty())
-                url += "&max_id=" + nextMaxId;
-
+            std::string url = API_BASE + "/friendships/" + userId + "/following/?count=50";
+            if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             if (resp.statusCode != 200) break;
-
             try {
-                std::string body = std::get<ByteData>(resp.body);
-                json data = json::parse(body);
-
+                json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("users")) break;
-
                 for (const auto& u : data["users"]) {
                     if (fetched >= maxCount) break;
-                    UserEntry entry;
-                    entry.username = u.value("username", "");
-                    entry.userId = std::to_string(u.value("pk", 0L));
-                    entry.fullName = u.value("full_name", "");
-                    entry.profilePicUrl = u.value("profile_pic_url", "");
-                    entry.isPrivate = u.value("is_private", false);
-                    entry.isVerified = u.value("is_verified", false);
-                    following.push_back(entry);
+                    UserEntry e;
+                    e.username      = u.value("username",       "");
+                    e.userId        = std::to_string(u.value("pk", 0LL));
+                    e.fullName      = u.value("full_name",       "");
+                    e.profilePicUrl = u.value("profile_pic_url","");
+                    e.isPrivate     = u.value("is_private",      false);
+                    e.isVerified    = u.value("is_verified",     false);
+                    results.push_back(e);
                     fetched++;
                 }
-
                 if (data.contains("next_max_id") && !data["next_max_id"].is_null())
                     nextMaxId = data["next_max_id"].get<std::string>();
-                else
-                    break;
-
-            } catch (const json::exception&) {
-                break;
-            }
+                else break;
+            } catch (...) { break; }
         }
-
-        return following;
+        return results;
     }
 
+    // -------------------------------------------------------------------------
+    // Feed
+    // -------------------------------------------------------------------------
     std::vector<MediaItem> SessionManager::FetchUserFeed(const std::string& userId, int maxCount) {
         std::vector<MediaItem> items;
         std::string nextMaxId;
         int fetched = 0;
-
         while (fetched < maxCount) {
             std::string url = API_BASE + "/feed/user/" + userId + "/?count=12";
-            if (!nextMaxId.empty())
-                url += "&max_id=" + nextMaxId;
-
+            if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             if (resp.statusCode != 200) break;
-
             try {
-                std::string body = std::get<ByteData>(resp.body);
-                json data = json::parse(body);
-
+                json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("items")) break;
-
                 for (const auto& item : data["items"]) {
                     if (fetched >= maxCount) break;
-                    MediaItem media;
-                    media.mediaId = std::to_string(item.value("pk", 0L));
-                    media.shortcode = item.value("code", "");
-                    media.likeCount = item.value("like_count", 0);
-                    media.commentCount = item.value("comment_count", 0);
-                    media.takenAt = std::to_string(item.value("taken_at", 0L));
-
-                    // Caption
-                    if (item.contains("caption") && !item["caption"].is_null()) {
-                        media.caption = item["caption"].value("text", "");
-                    }
-
-                    // Media type
-                    int mediaType = item.value("media_type", 1);
-                    if (mediaType == 1) media.mediaType = "photo";
-                    else if (mediaType == 2) media.mediaType = "video";
-                    else if (mediaType == 8) media.mediaType = "carousel";
-
-                    // Image URL
+                    MediaItem m;
+                    m.mediaId      = std::to_string(item.value("pk", 0LL));
+                    m.shortcode    = item.value("code", "");
+                    m.likeCount    = item.value("like_count",    0);
+                    m.commentCount = item.value("comment_count", 0);
+                    m.takenAt      = std::to_string(item.value("taken_at", 0LL));
+                    if (item.contains("caption") && !item["caption"].is_null())
+                        m.caption = item["caption"].value("text", "");
+                    int mt = item.value("media_type", 1);
+                    m.mediaType = (mt == 2) ? "video" : (mt == 8) ? "carousel" : "photo";
                     if (item.contains("image_versions2") &&
                         item["image_versions2"].contains("candidates") &&
-                        !item["image_versions2"]["candidates"].empty()) {
-                        media.imageUrl = item["image_versions2"]["candidates"][0].value("url", "");
-                    }
-
-                    // Video URL
-                    if (item.contains("video_versions") && !item["video_versions"].empty()) {
-                        media.videoUrl = item["video_versions"][0].value("url", "");
-                    }
-
-                    // Location
+                        !item["image_versions2"]["candidates"].empty())
+                        m.imageUrl = item["image_versions2"]["candidates"][0].value("url","");
+                    if (item.contains("video_versions") && !item["video_versions"].empty())
+                        m.videoUrl = item["video_versions"][0].value("url","");
                     if (item.contains("location") && !item["location"].is_null()) {
-                        media.location = item["location"].value("name", "");
-                        media.locationAddress = item["location"].value("address", "");
+                        m.location        = item["location"].value("name","");
+                        m.locationAddress = item["location"].value("address","");
                     }
-
-                    // Tagged users
-                    if (item.contains("usertags") && item["usertags"].contains("in")) {
-                        for (const auto& tag : item["usertags"]["in"]) {
-                            if (tag.contains("user")) {
-                                media.taggedUsers.push_back(tag["user"].value("username", ""));
-                            }
-                        }
+                    if (item.contains("usertags") && item["usertags"].contains("in"))
+                        for (const auto& tag : item["usertags"]["in"])
+                            if (tag.contains("user"))
+                                m.taggedUsers.push_back(tag["user"].value("username",""));
+                    if (!m.caption.empty()) {
+                        std::regex hashRx("#(\\w+)");
+                        auto beg = std::sregex_iterator(m.caption.begin(), m.caption.end(), hashRx);
+                        for (auto it = beg; it != std::sregex_iterator(); ++it)
+                            m.hashtags.push_back(it->str());
                     }
-
-                    // Extract hashtags from caption
-                    if (!media.caption.empty()) {
-                        std::regex hashtagRegex("#(\\w+)");
-                        auto begin = std::sregex_iterator(media.caption.begin(), media.caption.end(), hashtagRegex);
-                        auto end = std::sregex_iterator();
-                        for (auto it = begin; it != end; ++it) {
-                            media.hashtags.push_back(it->str());
-                        }
-                    }
-
-                    items.push_back(media);
+                    items.push_back(m);
                     fetched++;
                 }
-
+                if (!data.value("more_available", false)) break;
                 if (data.contains("next_max_id") && !data["next_max_id"].is_null())
                     nextMaxId = std::to_string(data["next_max_id"].get<long long>());
-                else if (data.value("more_available", false) == false)
-                    break;
-                else
-                    break;
-
-            } catch (const json::exception&) {
-                break;
-            }
+                else break;
+            } catch (...) { break; }
         }
-
         return items;
     }
 
+    // -------------------------------------------------------------------------
+    // Comments / Likers / Stories / Tags / Search
+    // -------------------------------------------------------------------------
     std::vector<CommentInfo> SessionManager::FetchMediaComments(const std::string& mediaId, int maxCount) {
-        std::vector<CommentInfo> comments;
+        std::vector<CommentInfo> results;
         std::string minId;
         int fetched = 0;
-
         while (fetched < maxCount) {
             std::string url = API_BASE + "/media/" + mediaId + "/comments/?can_support_threading=true&count=50";
-            if (!minId.empty())
-                url += "&min_id=" + minId;
-
+            if (!minId.empty()) url += "&min_id=" + minId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             if (resp.statusCode != 200) break;
-
             try {
-                std::string body = std::get<ByteData>(resp.body);
-                json data = json::parse(body);
-
+                json data = json::parse(std::get<ByteData>(resp.body));
                 if (!data.contains("comments")) break;
-
                 for (const auto& c : data["comments"]) {
                     if (fetched >= maxCount) break;
-                    CommentInfo comment;
-                    comment.commentId = std::to_string(c.value("pk", 0L));
-                    comment.text = c.value("text", "");
-                    comment.likeCount = c.value("comment_like_count", 0);
-                    comment.createdAt = std::to_string(c.value("created_at", 0L));
-
+                    CommentInfo ci;
+                    ci.commentId = std::to_string(c.value("pk", 0LL));
+                    ci.text      = c.value("text",               "");
+                    ci.likeCount = c.value("comment_like_count", 0);
+                    ci.createdAt = std::to_string(c.value("created_at", 0LL));
                     if (c.contains("user")) {
-                        comment.username = c["user"].value("username", "");
-                        comment.userId = std::to_string(c["user"].value("pk", 0L));
+                        ci.username = c["user"].value("username", "");
+                        ci.userId   = std::to_string(c["user"].value("pk", 0LL));
                     }
-
-                    comments.push_back(comment);
+                    results.push_back(ci);
                     fetched++;
                 }
-
                 if (data.contains("next_min_id") && !data["next_min_id"].is_null())
                     minId = data["next_min_id"].get<std::string>();
-                else
-                    break;
-
-            } catch (const json::exception&) {
-                break;
-            }
+                else break;
+            } catch (...) { break; }
         }
-
-        return comments;
+        return results;
     }
 
     std::vector<UserEntry> SessionManager::FetchMediaLikers(const std::string& mediaId, int maxCount) {
-        std::vector<UserEntry> likers;
-
-        std::string url = API_BASE + "/media/" + mediaId + "/likers/";
-        ResponseData resp = MakeAuthenticatedRequest(url);
-        if (resp.statusCode != 200) return likers;
-
+        std::vector<UserEntry> results;
+        ResponseData resp = MakeAuthenticatedRequest(API_BASE + "/media/" + mediaId + "/likers/");
+        if (resp.statusCode != 200) return results;
         try {
-            std::string body = std::get<ByteData>(resp.body);
-            json data = json::parse(body);
-
-            if (!data.contains("users")) return likers;
-
-            int count = 0;
+            json data = json::parse(std::get<ByteData>(resp.body));
+            if (!data.contains("users")) return results;
+            int n = 0;
             for (const auto& u : data["users"]) {
-                if (count >= maxCount) break;
-                UserEntry entry;
-                entry.username = u.value("username", "");
-                entry.userId = std::to_string(u.value("pk", 0L));
-                entry.fullName = u.value("full_name", "");
-                entry.profilePicUrl = u.value("profile_pic_url", "");
-                entry.isPrivate = u.value("is_private", false);
-                entry.isVerified = u.value("is_verified", false);
-                likers.push_back(entry);
-                count++;
+                if (n++ >= maxCount) break;
+                UserEntry e;
+                e.username      = u.value("username",       "");
+                e.userId        = std::to_string(u.value("pk", 0LL));
+                e.fullName      = u.value("full_name",       "");
+                e.profilePicUrl = u.value("profile_pic_url","");
+                e.isPrivate     = u.value("is_private",      false);
+                e.isVerified    = u.value("is_verified",     false);
+                results.push_back(e);
             }
-        } catch (const json::exception&) {}
-
-        return likers;
+        } catch (...) {}
+        return results;
     }
 
     std::optional<std::string> SessionManager::FetchProfilePicHD(const std::string& userId) {
-        std::string url = API_BASE + "/users/" + userId + "/info/";
-        ResponseData resp;
-        if (_currentUser.authenticated)
-            resp = MakeAuthenticatedRequest(url);
-        else
-            resp = MakePublicRequest(url);
-
+        ResponseData resp = _currentUser.authenticated
+            ? MakeAuthenticatedRequest(API_BASE + "/users/" + userId + "/info/")
+            : MakePublicRequest(API_BASE + "/users/" + userId + "/info/");
         if (resp.statusCode != 200) return std::nullopt;
-
         try {
-            std::string body = std::get<ByteData>(resp.body);
-            json data = json::parse(body);
-
+            json data = json::parse(std::get<ByteData>(resp.body));
             if (data.contains("user")) {
-                auto& user = data["user"];
-                if (user.contains("hd_profile_pic_url_info")) {
-                    return user["hd_profile_pic_url_info"].value("url", "");
-                }
-                if (user.contains("hd_profile_pic_versions") &&
-                    !user["hd_profile_pic_versions"].empty()) {
-                    return user["hd_profile_pic_versions"].back().value("url", "");
-                }
-                return user.value("profile_pic_url", "");
+                auto& u = data["user"];
+                if (u.contains("hd_profile_pic_url_info"))
+                    return u["hd_profile_pic_url_info"].value("url","");
+                if (u.contains("hd_profile_pic_versions") && !u["hd_profile_pic_versions"].empty())
+                    return u["hd_profile_pic_versions"].back().value("url","");
+                return u.value("profile_pic_url","");
             }
-        } catch (const json::exception&) {}
-
+        } catch (...) {}
         return std::nullopt;
     }
 
     std::vector<MediaItem> SessionManager::FetchStories(const std::string& userId) {
         std::vector<MediaItem> stories;
-
-        std::string url = API_BASE + "/feed/user/" + userId + "/story/";
-        ResponseData resp = MakeAuthenticatedRequest(url);
+        ResponseData resp = MakeAuthenticatedRequest(API_BASE + "/feed/user/" + userId + "/story/");
         if (resp.statusCode != 200) return stories;
-
         try {
-            std::string body = std::get<ByteData>(resp.body);
-            json data = json::parse(body);
-
+            json data = json::parse(std::get<ByteData>(resp.body));
             if (!data.contains("reel") || data["reel"].is_null()) return stories;
-
             auto& reel = data["reel"];
             if (!reel.contains("items")) return stories;
-
             for (const auto& item : reel["items"]) {
-                MediaItem media;
-                media.mediaId = std::to_string(item.value("pk", 0L));
-                media.takenAt = std::to_string(item.value("taken_at", 0L));
-
-                int mediaType = item.value("media_type", 1);
-                media.mediaType = (mediaType == 2) ? "video" : "photo";
-
+                MediaItem m;
+                m.mediaId   = std::to_string(item.value("pk", 0LL));
+                m.takenAt   = std::to_string(item.value("taken_at", 0LL));
+                m.mediaType = item.value("media_type", 1) == 2 ? "video" : "photo";
                 if (item.contains("image_versions2") &&
                     item["image_versions2"].contains("candidates") &&
-                    !item["image_versions2"]["candidates"].empty()) {
-                    media.imageUrl = item["image_versions2"]["candidates"][0].value("url", "");
-                }
-
-                if (item.contains("video_versions") && !item["video_versions"].empty()) {
-                    media.videoUrl = item["video_versions"][0].value("url", "");
-                }
-
-                stories.push_back(media);
+                    !item["image_versions2"]["candidates"].empty())
+                    m.imageUrl = item["image_versions2"]["candidates"][0].value("url","");
+                if (item.contains("video_versions") && !item["video_versions"].empty())
+                    m.videoUrl = item["video_versions"][0].value("url","");
+                stories.push_back(m);
             }
-        } catch (const json::exception&) {}
-
+        } catch (...) {}
         return stories;
     }
 
     std::vector<UserEntry> SessionManager::FetchTaggedUsers(const std::string& userId) {
         std::vector<UserEntry> tagged;
-
-        // Fetch user's feed and collect all tagged users
         auto feed = FetchUserFeed(userId, 50);
-        std::map<std::string, UserEntry> uniqueUsers;
-
-        for (const auto& item : feed) {
-            for (const auto& taggedUsername : item.taggedUsers) {
-                if (uniqueUsers.find(taggedUsername) == uniqueUsers.end()) {
-                    UserEntry entry;
-                    entry.username = taggedUsername;
-                    uniqueUsers[taggedUsername] = entry;
-                }
-            }
-        }
-
-        for (auto& [_, entry] : uniqueUsers) {
-            tagged.push_back(entry);
-        }
-
+        std::map<std::string, UserEntry> unique;
+        for (const auto& item : feed)
+            for (const auto& u : item.taggedUsers)
+                if (!unique.count(u)) { UserEntry e; e.username = u; unique[u] = e; }
+        for (auto& [_, e] : unique) tagged.push_back(e);
         return tagged;
     }
 
     std::vector<UserEntry> SessionManager::SearchUsers(const std::string& query, int maxCount) {
         std::vector<UserEntry> results;
-
-        std::string url = API_BASE + "/users/search/?q=" + query +
-                          "&count=" + std::to_string(maxCount) +
-                          "&timezone_offset=0";
-
-        ResponseData resp;
-        if (_currentUser.authenticated)
-            resp = MakeAuthenticatedRequest(url);
-        else
-            resp = MakePublicRequest(url);
-
+        std::string url = API_BASE + "/users/search/?q=" + query
+                        + "&count=" + std::to_string(maxCount) + "&timezone_offset=0";
+        ResponseData resp = _currentUser.authenticated
+            ? MakeAuthenticatedRequest(url)
+            : MakePublicRequest(url);
         if (resp.statusCode != 200) return results;
-
         try {
-            std::string body = std::get<ByteData>(resp.body);
-            json data = json::parse(body);
-
+            json data = json::parse(std::get<ByteData>(resp.body));
             if (!data.contains("users")) return results;
-
             for (const auto& u : data["users"]) {
-                UserEntry entry;
-                entry.username = u.value("username", "");
-                entry.userId = std::to_string(u.value("pk", 0L));
-                entry.fullName = u.value("full_name", "");
-                entry.profilePicUrl = u.value("profile_pic_url", "");
-                entry.isPrivate = u.value("is_private", false);
-                entry.isVerified = u.value("is_verified", false);
-                results.push_back(entry);
+                UserEntry e;
+                e.username      = u.value("username",       "");
+                e.userId        = std::to_string(u.value("pk", 0LL));
+                e.fullName      = u.value("full_name",       "");
+                e.profilePicUrl = u.value("profile_pic_url","");
+                e.isPrivate     = u.value("is_private",      false);
+                e.isVerified    = u.value("is_verified",     false);
+                results.push_back(e);
             }
-        } catch (const json::exception&) {}
-
+        } catch (...) {}
         return results;
     }
 

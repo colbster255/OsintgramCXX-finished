@@ -125,6 +125,11 @@ namespace IG {
         Headers BuildCommonHeaders() const;
         std::string BuildUserAgent() const;
 
+        // 2FA handler
+        bool Handle2FA(const json& initialResp, const std::string& username,
+                       const std::string& deviceId, const std::string& guid,
+                       const std::string& csrfToken);
+
         // Cookie parsing
         void ParseLoginCookies(const Headers& responseHeaders);
         std::string ExtractCookieValue(const std::string& cookieHeader, const std::string& name);
@@ -138,7 +143,6 @@ namespace IG {
         static const std::string API_BASE;
         static const std::string WEB_BASE;
         static const std::string IG_APP_ID;
-        static const std::string IG_SIG_KEY_VERSION;
     };
 
 }
