@@ -720,7 +720,8 @@ namespace IG {
             std::string gqlResp = GetResponseBody(resp);
 
             std::cerr << "[DBG] graphql: HTTP " << status
-                      << ", body=" << gqlResp.size() << "B" << std::endl;
+                      << ", body=" << gqlResp.size() << "B"
+                      << ", content: " << gqlResp.substr(0, 500) << std::endl;
 
             if (!gqlResp.empty() && gqlResp[0] == '{') {
                 try {
