@@ -32,12 +32,12 @@
                 },
                 {
                     "cmd": "userctl",
-                    "description": "Manages Instagram Accounts",
+                    "description": "Manages Instagram Accounts (login, logout, status, whoami)",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "sessionctl",
-                    "description": "Manages Instagram Target Sessions",
+                    "description": "Manages Instagram Target Sessions (target, current, clear, search)",
                     "exec_symbol": "cmd_handle"
                 },
                 {
@@ -55,7 +55,7 @@
         {
             "id": 1001,
             "label": "OsintgramCXX Instagram Interactives",
-            "description": "Command Set for Instagram Interaction",
+            "description": "Command Set for Instagram Interaction and OSINT",
             "author": "BC100Dev",
             "lib": {
                 "linux:x64": "libOsintgramCXX-interactive.so",
@@ -67,82 +67,112 @@
             "cmd_list": [
                 {
                     "cmd": "addrs",
-                    "description": "Get all registered addresses by target photos",
+                    "description": "Get all registered addresses/locations from target's geotagged posts",
+                    "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "bio",
+                    "description": "Show the target's biography and external URL",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "captions",
-                    "description": "Get captions from the photos",
+                    "description": "Get captions from the target's posts",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "comments",
-                    "description": "Returns the total number of comments on the posts",
+                    "description": "Returns the total number of comments on each post",
+                    "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "email",
+                    "description": "Show the target's public email and phone number",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "followers",
-                    "description": "Get a list of the target followers",
+                    "description": "Get a list of the target's followers",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "followings",
-                    "description": "Get a list of the target followings",
+                    "description": "Get a list of accounts the target is following",
+                    "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "fwercount",
+                    "description": "Show follower/following/post count and follow ratio",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "hashtags",
-                    "description": "Return a list of all hashtags that the target used within their posts",
+                    "description": "Return all hashtags used by the target with frequency counts",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "info",
-                    "description": "Show all information about the targets account",
+                    "description": "Show all information about the target's account",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "likes",
-                    "description": "Returns a total number of likes in the targets posts",
+                    "description": "Returns total like counts for each post and overall average",
+                    "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "likers",
+                    "description": "Show who liked the target's posts and identify top likers",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "mediatype",
-                    "description": "Shows the count of photos and videos shared by the target themselves",
+                    "description": "Shows the count of photos, videos, and carousels shared by the target",
+                    "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "mutual",
+                    "description": "Find mutual followers/following and accounts not followed back",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "photodesc",
-                    "description": "Fetches a list with the description of the content from targets posts",
+                    "description": "Detailed description of each post (type, date, likes, location, tags)",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "photos",
-                    "description": "Download a number of specific count of targets photos to the specific output directory",
+                    "description": "Get download URLs for the target's photos",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "pfp",
-                    "description": "Download the profile picture (attempts to download the HD version, if available)",
+                    "description": "Get the profile picture URL (attempts HD version if available)",
+                    "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "post.comments",
+                    "description": "Show all comments on each of the target's posts with usernames and timestamps",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "stories",
-                    "description": "Download the currently seen stories that the target has shown online",
+                    "description": "Get URLs for the target's currently active stories",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "tagged",
-                    "description": "Returns a list of users tagged by the user ID, name and display name",
+                    "description": "Returns a list of users tagged by the target in their posts",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "u.comments",
-                    "description": "Returns a list of users that commented on targets posts",
+                    "description": "Returns all users who commented on the target's posts ranked by frequency",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "u.tagged",
-                    "description": "Returns a list of users that tagged the target in their posts",
+                    "description": "Returns users who tagged the target in their posts",
                     "exec_symbol": "cmd_handle"
                 }
             ]
