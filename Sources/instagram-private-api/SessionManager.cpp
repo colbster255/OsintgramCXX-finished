@@ -704,58 +704,83 @@ namespace IG {
                       << ", body=" << body.size() << "B" << std::endl;
         }
 
-        // Attempt 2: Instagram GraphQL query (separate rate limit pool)
+        // Attempt 2: Instagram GraphQL queries (separate rate limit pool)
+        // Try multiple known doc_ids for user profile queries
         if (body.empty() || body[0] != '{') {
-            // doc_id for PolarisProfilePageContentQuery (user profile by username)
-            std::string variables = "{\"username\":\"" + username + "\"}";
-            std::string graphqlBody =
-                "variables=" + urlEncode(variables) +
-                "&doc_id=9310670392322965";  // PolarisProfilePageContentQuery
+            std::vector<std::string> docIds = {
+                "9310670392322965",   // PolarisProfilePageContentQuery
+                "7862754640465977",   // PolarisProfilePageContentQuery (alt)
+                "8845758582119845",   // UserProfileQuery
+                "17888483320059182",  // ProfilePageQuery
+            };
 
-            ResponseData resp = MakeAuthenticatedRequest(
-                WEB_BASE + "/graphql/query/",
-                RequestMethod::REQ_POST,
-                graphqlBody);
-            status = resp.statusCode;
-            std::string gqlResp = GetResponseBody(resp);
+            for (const auto& docId : docIds) {
+                std::string variables = "{\"username\":\"" + username + "\",\"render_surface\":\"PROFILE\"}";
+                std::string graphqlBody =
+                    "variables=" + urlEncode(variables) +
+                    "&doc_id=" + docId;
 
-            std::cerr << "[DBG] graphql: HTTP " << status
-                      << ", body=" << gqlResp.size() << "B"
-                      << ", content: " << gqlResp.substr(0, 500) << std::endl;
+                ResponseData resp = MakeAuthenticatedRequest(
+                    WEB_BASE + "/graphql/query/",
+                    RequestMethod::REQ_POST,
+                    graphqlBody);
+                status = resp.statusCode;
+                std::string gqlResp = GetResponseBody(resp);
 
-            if (!gqlResp.empty() && gqlResp[0] == '{') {
-                try {
-                    json gql = json::parse(gqlResp);
-                    // GraphQL response: { "data": { "user": { ... } } }
-                    if (gql.contains("data") && gql["data"].contains("user") &&
-                        !gql["data"]["user"].is_null()) {
-                        body = gql.dump();
-                    }
-                } catch (...) {}
+                std::cerr << "[DBG] graphql doc_id=" << docId << ": HTTP " << status
+                          << ", body=" << gqlResp.size() << "B"
+                          << ", content: " << gqlResp.substr(0, 300) << std::endl;
+
+                if (!gqlResp.empty() && gqlResp[0] == '{') {
+                    try {
+                        json gql = json::parse(gqlResp);
+                        // Check for actual user data (not null/error)
+                        if (gql.contains("data") && !gql["data"].is_null() &&
+                            gql["data"].contains("user") && !gql["data"]["user"].is_null()) {
+                            body = gql.dump();
+                            break;
+                        }
+                    } catch (...) {}
+                }
             }
         }
 
-        // Attempt 3: older GraphQL query hash endpoint
+        // Attempt 3: older GraphQL query_hash GET endpoints
         if (body.empty() || body[0] != '{') {
-            // query_hash for profile info (older but sometimes still works)
-            std::string variables = urlEncode("{\"username\":\"" + username + "\"}");
-            std::string url = WEB_BASE + "/graphql/query/?query_hash=c9100bf9110dd6361671f113dd02e7d6&variables=" + variables;
+            std::vector<std::string> queryHashes = {
+                "c9100bf9110dd6361671f113dd02e7d6",
+                "d4d88dc1500312af6f937f7b804c68c3",
+                "69cba40317214236af40e7efa697781d",
+            };
 
-            ResponseData resp = MakeAuthenticatedRequest(url);
-            status = resp.statusCode;
-            std::string gqlResp = GetResponseBody(resp);
+            for (const auto& hash : queryHashes) {
+                std::string variables = urlEncode("{\"username\":\"" + username + "\"}");
+                std::string url = WEB_BASE + "/graphql/query/?query_hash=" + hash + "&variables=" + variables;
 
-            std::cerr << "[DBG] graphql_hash: HTTP " << status
-                      << ", body=" << gqlResp.size() << "B" << std::endl;
+                ResponseData resp = MakeAuthenticatedRequest(url);
+                status = resp.statusCode;
+                std::string gqlResp = GetResponseBody(resp);
 
-            if (!gqlResp.empty() && gqlResp[0] == '{') {
-                try {
-                    json gql = json::parse(gqlResp);
-                    if (gql.contains("data") && gql["data"].contains("user") &&
-                        !gql["data"]["user"].is_null()) {
-                        body = gql.dump();
-                    }
-                } catch (...) {}
+                std::cerr << "[DBG] graphql_hash=" << hash.substr(0,8) << ": HTTP " << status
+                          << ", body=" << gqlResp.size() << "B"
+                          << ", content: " << gqlResp.substr(0, 300) << std::endl;
+
+                if (!gqlResp.empty() && gqlResp[0] == '{') {
+                    try {
+                        json gql = json::parse(gqlResp);
+                        if (gql.contains("data") && !gql["data"].is_null() &&
+                            gql["data"].contains("user") && !gql["data"]["user"].is_null()) {
+                            body = gql.dump();
+                            break;
+                        }
+                        // Some return graphql.user instead
+                        if (gql.contains("graphql") && gql["graphql"].contains("user") &&
+                            !gql["graphql"]["user"].is_null()) {
+                            body = gql.dump();
+                            break;
+                        }
+                    } catch (...) {}
+                }
             }
         }
 
@@ -830,6 +855,13 @@ namespace IG {
                 info.profilePicUrlHD = userJson["hd_profile_pic_url_info"].value("url", info.profilePicUrl);
             else
                 info.profilePicUrlHD = info.profilePicUrl;
+
+            // Validate we got real data (reject empty/null results)
+            if (info.userId.empty() && info.fullName.empty() &&
+                info.followerCount == 0 && info.mediaCount == 0) {
+                std::cerr << "[!] Profile data for '" << username << "' appears empty, rejecting." << std::endl;
+                return std::nullopt;
+            }
 
             return info;
 
