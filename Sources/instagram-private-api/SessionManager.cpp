@@ -152,7 +152,6 @@ namespace IG {
             {"guid", "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
             {"device_id", "android-a1b2c3d4e5f67890"},
             {"enc_password", encPassword},
-            {"password", password},
             {"login_attempt_count", "0"}
         };
 
