@@ -102,6 +102,9 @@ namespace IG {
         bool HasTarget() const;
         TargetInfo GetTarget() const;
         std::string GetTargetUsername() const;
+        std::optional<TargetInfo> GetTargetByName(const std::string& username) const;
+        std::vector<TargetInfo> ListTargets() const;
+        void ClearTarget();
 
         // Instagram API methods
         std::optional<TargetInfo> FetchUserInfo(const std::string& username);
@@ -149,6 +152,7 @@ namespace IG {
         UserSession _currentUser;
         TargetInfo _currentTarget;
         bool _hasTarget = false;
+        std::map<std::string, TargetInfo> _targets;  // all loaded targets by username
         mutable std::mutex _mutex;
 
         // Encryption keys from Instagram

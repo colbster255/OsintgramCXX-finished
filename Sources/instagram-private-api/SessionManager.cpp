@@ -801,9 +801,21 @@ namespace IG {
     // Target management
     // -------------------------------------------------------------------------
     bool SessionManager::SetTarget(const std::string& username) {
+        // Check if already loaded
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            auto it = _targets.find(username);
+            if (it != _targets.end()) {
+                _currentTarget = it->second;
+                _hasTarget     = true;
+                return true;
+            }
+        }
+        // Fetch fresh
         auto info = FetchUserInfo(username);
         if (!info.has_value()) return false;
         std::lock_guard<std::mutex> lock(_mutex);
+        _targets[username] = info.value();
         _currentTarget = info.value();
         _hasTarget     = true;
         return true;
@@ -822,6 +834,26 @@ namespace IG {
     std::string SessionManager::GetTargetUsername() const {
         std::lock_guard<std::mutex> lock(_mutex);
         return _currentTarget.username;
+    }
+
+    std::optional<TargetInfo> SessionManager::GetTargetByName(const std::string& username) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _targets.find(username);
+        if (it != _targets.end()) return it->second;
+        return std::nullopt;
+    }
+
+    std::vector<TargetInfo> SessionManager::ListTargets() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        std::vector<TargetInfo> result;
+        for (const auto& [_, t] : _targets) result.push_back(t);
+        return result;
+    }
+
+    void SessionManager::ClearTarget() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _currentTarget = TargetInfo{};
+        _hasTarget = false;
     }
 
     // -------------------------------------------------------------------------

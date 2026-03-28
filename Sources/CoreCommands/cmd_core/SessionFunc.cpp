@@ -10,9 +10,10 @@ static void showUsage() {
     std::cout << "Actions:" << std::endl;
 
     HelpPage actions;
-    actions.addArg("target", "<username>", "Set the target Instagram account for OSINT");
-    actions.addArg("current", "", "Show the currently set target");
-    actions.addArg("clear", "", "Clear the current target");
+    actions.addArg("target", "<username>", "Set/switch the active target (stays loaded)");
+    actions.addArg("current", "", "Show the currently active target");
+    actions.addArg("list", "", "Show all loaded targets");
+    actions.addArg("clear", "", "Clear the active target");
     actions.addArg("search", "<query>", "Search for Instagram users");
     actions.setStartSpaceWidth(3);
     actions.setSpaceWidth(3);
@@ -20,9 +21,11 @@ static void showUsage() {
 
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "   sessionctl target johndoe" << std::endl;
-    std::cout << "   sessionctl current" << std::endl;
-    std::cout << "   sessionctl search john" << std::endl;
+    std::cout << "   sessionctl target johndoe       # load and set active" << std::endl;
+    std::cout << "   sessionctl target janedoe        # load second target" << std::endl;
+    std::cout << "   sessionctl target johndoe        # switch back (instant)" << std::endl;
+    std::cout << "   sessionctl list                  # show all loaded" << std::endl;
+    std::cout << "   shared johndoe janedoe           # compare two targets" << std::endl;
 }
 
 static int doSetTarget(const std::vector<std::string>& args) {
@@ -39,7 +42,14 @@ static int doSetTarget(const std::vector<std::string>& args) {
     }
 
     std::string targetUsername = args[1];
-    std::cout << "[*] Looking up user '" << targetUsername << "'..." << std::endl;
+
+    // Check if already loaded (instant switch)
+    auto existing = mgr.GetTargetByName(targetUsername);
+    if (existing.has_value()) {
+        std::cout << "[+] Switched to already-loaded target: " << targetUsername << std::endl;
+    } else {
+        std::cout << "[*] Looking up user '" << targetUsername << "'..." << std::endl;
+    }
 
     if (mgr.SetTarget(targetUsername)) {
         auto target = mgr.GetTarget();
@@ -95,15 +105,45 @@ static int doClear() {
     auto& mgr = IG::SessionManager::Instance();
 
     if (!mgr.HasTarget()) {
-        std::cout << "[*] No target to clear" << std::endl;
+        std::cout << "[*] No active target to clear" << std::endl;
         return 0;
     }
 
     std::string oldTarget = mgr.GetTargetUsername();
-    // Re-initialize to clear target (Logout and re-login is not needed, just clear target state)
-    // For now we'll note that clearing target requires some mechanism
-    std::cout << "[+] Target '" << oldTarget << "' cleared" << std::endl;
-    std::cout << "[*] Use 'sessionctl target <username>' to set a new target" << std::endl;
+    mgr.ClearTarget();
+    std::cout << "[+] Active target '" << oldTarget << "' cleared (still loaded, can switch back)" << std::endl;
+    std::cout << "[*] Use 'sessionctl target <username>' to set a target" << std::endl;
+    return 0;
+}
+
+static int doList() {
+    auto& mgr = IG::SessionManager::Instance();
+
+    auto targets = mgr.ListTargets();
+    std::string activeUsername = mgr.HasTarget() ? mgr.GetTargetUsername() : "";
+
+    if (targets.empty()) {
+        std::cout << "[*] No targets loaded" << std::endl;
+        std::cout << "[*] Use 'sessionctl target <username>' to load one" << std::endl;
+        return 0;
+    }
+
+    std::cout << "[+] Loaded targets (" << targets.size() << "):" << std::endl << std::endl;
+
+    for (const auto& t : targets) {
+        bool isActive = (t.username == activeUsername);
+        std::cout << "  " << (isActive ? ">> " : "   ") << "@" << t.username;
+        if (!t.fullName.empty()) std::cout << " (" << t.fullName << ")";
+        if (t.isPrivate) std::cout << " [Private]";
+        if (t.isVerified) std::cout << " [Verified]";
+        std::cout << " | " << t.followerCount << " followers, "
+                  << t.followingCount << " following";
+        if (isActive) std::cout << "  <-- active";
+        std::cout << std::endl;
+    }
+
+    std::cout << std::endl;
+    std::cout << "[*] Switch with: sessionctl target <username>" << std::endl;
     return 0;
 }
 
@@ -163,6 +203,8 @@ int session_func(const std::vector<std::string>& args, const std::map<std::strin
         return doShowCurrent();
     } else if (action == "clear") {
         return doClear();
+    } else if (action == "list" || action == "ls" || action == "targets") {
+        return doList();
     } else if (action == "search" || action == "find") {
         return doSearch(args);
     } else {

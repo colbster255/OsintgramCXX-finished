@@ -19,6 +19,22 @@
 namespace fs = std::filesystem;
 
 // ============================================================================
+// Helper: Resolve a target by username (from cache or fetch fresh)
+// ============================================================================
+static std::optional<IG::TargetInfo> resolveTarget(const std::string& username) {
+    auto& mgr = IG::SessionManager::Instance();
+    // Check if already loaded
+    auto cached = mgr.GetTargetByName(username);
+    if (cached.has_value()) return cached;
+    // Fetch fresh via SetTarget (which adds to cache)
+    std::cout << "[*] Loading @" << username << "..." << std::endl;
+    if (mgr.SetTarget(username)) {
+        return mgr.GetTargetByName(username);
+    }
+    return std::nullopt;
+}
+
+// ============================================================================
 // Helper: Check prerequisites (logged in + target set)
 // ============================================================================
 static bool checkReady(const std::string& cmd) {
@@ -1408,83 +1424,133 @@ static int cmd_umentions(const std::vector<std::string>& args) {
 // Command: shared - shared connections between you and the target
 // ============================================================================
 static int cmd_shared(const std::vector<std::string>& args) {
-    if (!checkReady("shared")) return 1;
-
     auto& mgr = IG::SessionManager::Instance();
-    auto target = mgr.GetTarget();
-    auto session = mgr.GetCurrentSession();
 
-    std::cout << "[*] Finding shared connections between you and @" << target.username << "..." << std::endl;
+    if (!mgr.IsLoggedIn()) {
+        std::cerr << "[!] shared: You must be logged in first" << std::endl;
+        return 1;
+    }
 
-    // Get your followers/following
-    std::cout << "[*] Fetching your connections..." << std::endl;
-    auto myFollowing = mgr.FetchFollowing(session.userId);
-    auto myFollowers = mgr.FetchFollowers(session.userId);
+    // Determine the two users to compare:
+    //   shared                → you vs active target
+    //   shared <user>         → active target vs <user>
+    //   shared <user1> <user2> → <user1> vs <user2>
+    std::string nameA, nameB;
+    std::string idA, idB;
 
-    std::set<std::string> myFollowingSet, myFollowerSet;
-    for (const auto& f : myFollowing) myFollowingSet.insert(f.username);
-    for (const auto& f : myFollowers) myFollowerSet.insert(f.username);
+    if (args.size() >= 2) {
+        // Two explicit targets
+        nameA = args[0];
+        nameB = args[1];
+        auto tA = resolveTarget(nameA);
+        auto tB = resolveTarget(nameB);
+        if (!tA) { std::cerr << "[!] Could not load @" << nameA << std::endl; return 1; }
+        if (!tB) { std::cerr << "[!] Could not load @" << nameB << std::endl; return 1; }
+        idA = tA->userId;
+        idB = tB->userId;
+    } else if (args.size() == 1) {
+        // Active target vs specified user
+        if (!mgr.HasTarget()) {
+            std::cerr << "[!] No active target set. Use: shared <user1> <user2>" << std::endl;
+            return 1;
+        }
+        auto target = mgr.GetTarget();
+        nameA = target.username;
+        idA   = target.userId;
+        nameB = args[0];
+        auto tB = resolveTarget(nameB);
+        if (!tB) { std::cerr << "[!] Could not load @" << nameB << std::endl; return 1; }
+        idB = tB->userId;
+    } else {
+        // You vs active target
+        if (!mgr.HasTarget()) {
+            std::cerr << "[!] shared: No target set. Usage: shared [user1] [user2]" << std::endl;
+            return 1;
+        }
+        auto session = mgr.GetCurrentSession();
+        auto target = mgr.GetTarget();
+        nameA = session.username;
+        idA   = session.userId;
+        nameB = target.username;
+        idB   = target.userId;
+    }
 
-    // Get target's followers/following
-    std::cout << "[*] Fetching @" << target.username << "'s connections..." << std::endl;
-    auto targetFollowing = mgr.FetchFollowing(target.userId);
-    auto targetFollowers = mgr.FetchFollowers(target.userId);
+    std::cout << "[*] Finding shared connections between @" << nameA << " and @" << nameB << "..." << std::endl;
 
-    std::set<std::string> targetFollowingSet, targetFollowerSet;
-    for (const auto& f : targetFollowing) targetFollowingSet.insert(f.username);
-    for (const auto& f : targetFollowers) targetFollowerSet.insert(f.username);
+    // Fetch connections for both
+    std::cout << "[*] Fetching @" << nameA << "'s connections..." << std::endl;
+    auto followingA = mgr.FetchFollowing(idA);
+    auto followersA = mgr.FetchFollowers(idA);
 
-    // Find shared: people you both follow
+    std::cout << "[*] Fetching @" << nameB << "'s connections..." << std::endl;
+    auto followingB = mgr.FetchFollowing(idB);
+    auto followersB = mgr.FetchFollowers(idB);
+
+    std::set<std::string> followingSetA, followerSetA, followingSetB, followerSetB;
+    for (const auto& f : followingA) followingSetA.insert(f.username);
+    for (const auto& f : followersA) followerSetA.insert(f.username);
+    for (const auto& f : followingB) followingSetB.insert(f.username);
+    for (const auto& f : followersB) followerSetB.insert(f.username);
+
+    // Both follow
     std::vector<std::string> bothFollow;
-    for (const auto& u : myFollowingSet) {
-        if (targetFollowingSet.count(u)) bothFollow.push_back(u);
-    }
+    for (const auto& u : followingSetA)
+        if (followingSetB.count(u)) bothFollow.push_back(u);
 
-    // Find shared: people who follow you both
+    // Follow both
     std::vector<std::string> followBoth;
-    for (const auto& u : myFollowerSet) {
-        if (targetFollowerSet.count(u)) followBoth.push_back(u);
-    }
+    for (const auto& u : followerSetA)
+        if (followerSetB.count(u)) followBoth.push_back(u);
 
-    // People target follows that follow you (potential bridges)
-    std::vector<std::string> targetFollowsYouFollow;
-    for (const auto& u : targetFollowingSet) {
-        if (myFollowerSet.count(u)) targetFollowsYouFollow.push_back(u);
-    }
+    // A follows people who follow B (bridges A→B)
+    std::vector<std::string> bridgesAtoB;
+    for (const auto& u : followingSetA)
+        if (followerSetB.count(u)) bridgesAtoB.push_back(u);
+
+    // B follows people who follow A (bridges B→A)
+    std::vector<std::string> bridgesBtoA;
+    for (const auto& u : followingSetB)
+        if (followerSetA.count(u)) bridgesBtoA.push_back(u);
+
+    // A follows B / B follows A
+    bool aFollowsB = followingSetA.count(nameB) > 0;
+    bool bFollowsA = followingSetB.count(nameA) > 0;
 
     std::cout << std::endl;
-    std::cout << "[+] Connection overlap with @" << target.username << ":" << std::endl << std::endl;
+    std::cout << "[+] Connection overlap: @" << nameA << " vs @" << nameB << std::endl << std::endl;
 
-    std::cout << "  You follow:            " << myFollowingSet.size() << std::endl;
-    std::cout << "  Target follows:        " << targetFollowingSet.size() << std::endl;
-    std::cout << "  Both of you follow:    " << bothFollow.size() << std::endl;
-    std::cout << "  Follow both of you:    " << followBoth.size() << std::endl;
+    std::cout << "  @" << nameA << " follows:      " << followingSetA.size() << std::endl;
+    std::cout << "  @" << nameB << " follows:      " << followingSetB.size() << std::endl;
+    std::cout << "  @" << nameA << " followers:    " << followerSetA.size() << std::endl;
+    std::cout << "  @" << nameB << " followers:    " << followerSetB.size() << std::endl;
+    std::cout << std::endl;
+    std::cout << "  Both follow:           " << bothFollow.size() << std::endl;
+    std::cout << "  Follow both:           " << followBoth.size() << std::endl;
+
+    if (aFollowsB || bFollowsA) {
+        std::cout << std::endl;
+        if (aFollowsB && bFollowsA)
+            std::cout << "  @" << nameA << " and @" << nameB << " follow each other (mutuals)" << std::endl;
+        else if (aFollowsB)
+            std::cout << "  @" << nameA << " follows @" << nameB << " (not mutual)" << std::endl;
+        else
+            std::cout << "  @" << nameB << " follows @" << nameA << " (not mutual)" << std::endl;
+    }
     std::cout << std::endl;
 
     if (!bothFollow.empty()) {
         std::sort(bothFollow.begin(), bothFollow.end());
-        std::cout << "[+] Accounts you BOTH follow (" << bothFollow.size() << "):" << std::endl;
-        for (const auto& u : bothFollow) {
+        std::cout << "[+] Accounts BOTH follow (" << bothFollow.size() << "):" << std::endl;
+        for (const auto& u : bothFollow)
             std::cout << "  @" << u << std::endl;
-        }
         std::cout << std::endl;
     }
 
     if (!followBoth.empty()) {
         std::sort(followBoth.begin(), followBoth.end());
-        std::cout << "[+] Accounts that follow BOTH of you (" << followBoth.size() << "):" << std::endl;
-        for (const auto& u : followBoth) {
+        std::cout << "[+] Accounts that follow BOTH (" << followBoth.size() << "):" << std::endl;
+        for (const auto& u : followBoth)
             std::cout << "  @" << u << std::endl;
-        }
-        std::cout << std::endl;
-    }
-
-    if (!targetFollowsYouFollow.empty()) {
-        std::sort(targetFollowsYouFollow.begin(), targetFollowsYouFollow.end());
-        std::cout << "[+] Target follows, you're followed by (" << targetFollowsYouFollow.size() << "):" << std::endl;
-        for (const auto& u : targetFollowsYouFollow) {
-            std::cout << "  @" << u << std::endl;
-        }
         std::cout << std::endl;
     }
 

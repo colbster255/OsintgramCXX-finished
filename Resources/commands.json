@@ -192,7 +192,7 @@
                 },
                 {
                     "cmd": "shared",
-                    "description": "Find shared connections between you and the target",
+                    "description": "Find shared connections (shared / shared <user> / shared <user1> <user2>)",
                     "exec_symbol": "cmd_handle"
                 }
             ]
