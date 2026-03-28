@@ -681,7 +681,10 @@ namespace IG {
             sess["savedAt"]   = std::time(nullptr);
             std::ofstream out(path);
             out << sess.dump(2);
-        } catch (...) {}
+            std::cerr << "[+] Session saved to " << path << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[!] Failed to save session: " << e.what() << std::endl;
+        }
     }
 
     bool SessionManager::LoadSessionFromFile(const std::string& username) {
@@ -983,6 +986,10 @@ namespace IG {
             // Friendship status (from /users/{id}/info/ response)
             if (userJson.contains("friendship_status")) {
                 info.isFollowing = userJson["friendship_status"].value("following", false);
+                std::cerr << "[DBG] friendship_status: following="
+                          << (info.isFollowing ? "true" : "false") << std::endl;
+            } else {
+                std::cerr << "[DBG] No friendship_status in response" << std::endl;
             }
 
             // Validate we got at least a user ID
