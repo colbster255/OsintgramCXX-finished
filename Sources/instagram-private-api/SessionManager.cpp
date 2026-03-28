@@ -848,87 +848,63 @@ namespace IG {
             }
         }
 
-        // Attempt 3: GraphQL query_hash with full variables
-        // This returns limited data (reel info + user ID) but we can use the ID for a full lookup
-        std::string discoveredUserId;
+        // Attempt 3: Search for user via /web/search/topsearch/ to get user ID,
+        // then fetch full profile via /users/{id}/info/
         if (body.empty()) {
-            std::string variables = urlEncode(
-                "{\"username\":\"" + username + "\","
-                "\"include_reel\":true,"
-                "\"include_logged_out\":true}");
-            std::string url = WEB_BASE + "/graphql/query/?query_hash=c9100bf9110dd6361671f113dd02e7d6&variables=" + variables;
-
-            ResponseData resp = MakeAuthenticatedRequest(url);
+            std::string searchUrl = WEB_BASE + "/web/search/topsearch/?query=" + urlEncode(username)
+                                  + "&context=user&include_reel=false";
+            ResponseData resp = MakeAuthenticatedRequest(searchUrl);
             status = resp.statusCode;
-            std::string gqlResp = GetResponseBody(resp);
+            std::string searchResp = GetResponseBody(resp);
 
-            std::cerr << "[DBG] graphql: HTTP " << status
-                      << ", body=" << gqlResp.size() << "B" << std::endl;
+            std::cerr << "[DBG] topsearch: HTTP " << status
+                      << ", body=" << searchResp.size() << "B" << std::endl;
 
-            if (!gqlResp.empty() && gqlResp[0] == '{') {
+            std::string discoveredUserId;
+            if (!searchResp.empty() && searchResp[0] == '{') {
                 try {
-                    json gql = json::parse(gqlResp);
-                    if (gql.contains("data") && gql["data"].contains("user") &&
-                        gql["data"]["user"].is_object()) {
-                        auto& usr = gql["data"]["user"];
-
-                        // Helper to extract ID and verify it belongs to the target user
-                        auto extractIdIfMatch = [&](const json& userObj) -> std::string {
-                            // Check username matches target (if present)
-                            if (userObj.contains("username")) {
-                                std::string retUsername = userObj.value("username", "");
-                                if (!retUsername.empty() && retUsername != username) {
-                                    std::cerr << "[DBG] GraphQL returned '" << retUsername
-                                              << "' instead of '" << username << "', skipping" << std::endl;
-                                    return "";
-                                }
+                    json searchData = json::parse(searchResp);
+                    if (searchData.contains("users")) {
+                        for (const auto& entry : searchData["users"]) {
+                            json u = entry.contains("user") ? entry["user"] : entry;
+                            std::string foundUsername = u.value("username", "");
+                            if (foundUsername == username) {
+                                if (u.contains("pk"))
+                                    discoveredUserId = u["pk"].is_string()
+                                        ? u["pk"].get<std::string>()
+                                        : std::to_string(u.value("pk", 0LL));
+                                else if (u.contains("id"))
+                                    discoveredUserId = u["id"].is_string()
+                                        ? u["id"].get<std::string>()
+                                        : std::to_string(u.value("id", 0LL));
+                                break;
                             }
-                            if (userObj.contains("id"))
-                                return userObj["id"].is_string()
-                                    ? userObj["id"].get<std::string>()
-                                    : std::to_string(userObj.value("id", 0LL));
-                            return "";
-                        };
-
-                        // Try reel.user first (most common in this response format)
-                        if (usr.contains("reel") && usr["reel"].contains("user"))
-                            discoveredUserId = extractIdIfMatch(usr["reel"]["user"]);
-                        // Try direct user object
-                        if (discoveredUserId.empty() || discoveredUserId == "0")
-                            discoveredUserId = extractIdIfMatch(usr);
-
-                        // If the user object has full profile data, use it
-                        if (usr.contains("username") && usr.value("username", "") == username &&
-                            usr.contains("biography")) {
-                            body = gql.dump();
                         }
                     }
                 } catch (...) {}
             }
 
+            // If we found the user ID, fetch full profile
             if (!discoveredUserId.empty() && discoveredUserId != "0") {
-                std::cerr << "[+] Discovered user ID: " << discoveredUserId << std::endl;
-            }
-        }
+                std::cerr << "[+] Found user ID via search: " << discoveredUserId << std::endl;
 
-        // Attempt 4: Use discovered user ID to get full profile via /users/{id}/info/
-        if (body.empty() && !discoveredUserId.empty() && discoveredUserId != "0") {
-            std::string url = API_BASE + "/users/" + discoveredUserId + "/info/";
-            ResponseData resp = MakeAuthenticatedRequest(url);
-            status = resp.statusCode;
-            std::string infoResp = GetResponseBody(resp);
+                std::string infoUrl = API_BASE + "/users/" + discoveredUserId + "/info/";
+                ResponseData infoResp = MakeAuthenticatedRequest(infoUrl);
+                status = infoResp.statusCode;
+                std::string infoBody = GetResponseBody(infoResp);
 
-            std::cerr << "[DBG] users/info: HTTP " << status
-                      << ", body=" << infoResp.size() << "B" << std::endl;
+                std::cerr << "[DBG] users/info: HTTP " << status
+                          << ", body=" << infoBody.size() << "B" << std::endl;
 
-            if (!infoResp.empty() && infoResp[0] == '{') {
-                try {
-                    json info = json::parse(infoResp);
-                    if (info.contains("user") && info["user"].is_object() &&
-                        !info["user"].empty()) {
-                        body = infoResp;
-                    }
-                } catch (...) {}
+                if (!infoBody.empty() && infoBody[0] == '{') {
+                    try {
+                        json info = json::parse(infoBody);
+                        if (info.contains("user") && info["user"].is_object() &&
+                            !info["user"].empty()) {
+                            body = infoBody;
+                        }
+                    } catch (...) {}
+                }
             }
         }
 
