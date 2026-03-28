@@ -92,12 +92,12 @@
                 },
                 {
                     "cmd": "followers",
-                    "description": "Get a list of the target's followers",
+                    "description": "Get ALL of the target's followers (optionally: followers <limit>)",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "followings",
-                    "description": "Get a list of accounts the target is following",
+                    "description": "Get ALL accounts the target is following (optionally: followings <limit>)",
                     "exec_symbol": "cmd_handle"
                 },
                 {
@@ -167,12 +167,12 @@
                 },
                 {
                     "cmd": "u.comments",
-                    "description": "Returns all users who commented on the target's posts ranked by frequency",
+                    "description": "Find commenters on target's posts + target's comments on tagged posts",
                     "exec_symbol": "cmd_handle"
                 },
                 {
                     "cmd": "u.tagged",
-                    "description": "Returns users who tagged the target in their posts",
+                    "description": "Find all posts where others tagged the target (photo tags)",
                     "exec_symbol": "cmd_handle"
                 },
                 {
