@@ -194,6 +194,11 @@
                     "cmd": "shared",
                     "description": "Find shared connections (shared / shared <user> / shared <user1> <user2>)",
                     "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "shared.activity",
+                    "description": "Scan all shared public followings for comments/likes by two targets",
+                    "exec_symbol": "cmd_handle"
                 }
             ]
         }

@@ -1277,6 +1277,208 @@ static int cmd_uactivity(const std::vector<std::string>& args) {
 }
 
 // ============================================================================
+// Command: shared.activity - scan shared followings for activity by two targets
+// ============================================================================
+static int cmd_shared_activity(const std::vector<std::string>& args) {
+    auto& mgr = IG::SessionManager::Instance();
+
+    if (!mgr.IsLoggedIn()) {
+        std::cerr << "[!] shared.activity: You must be logged in first" << std::endl;
+        return 1;
+    }
+
+    // Usage:
+    //   shared.activity <user1> <user2> [posts_per_account]
+    //   shared.activity <user2> [posts_per_account]   (active target vs <user2>)
+    //   shared.activity [posts_per_account]           (you vs active target)
+    std::string nameA, nameB;
+    std::string idA, idB;
+    int postsPerAccount = 10;
+
+    if (args.size() >= 2) {
+        nameA = args[0];
+        nameB = args[1];
+        if (args.size() >= 3) {
+            try { postsPerAccount = std::stoi(args[2]); } catch (...) {}
+        }
+
+        auto tA = resolveTarget(nameA);
+        auto tB = resolveTarget(nameB);
+        if (!tA) { std::cerr << "[!] Could not load @" << nameA << std::endl; return 1; }
+        if (!tB) { std::cerr << "[!] Could not load @" << nameB << std::endl; return 1; }
+        idA = tA->userId;
+        idB = tB->userId;
+    } else if (args.size() == 1) {
+        if (!mgr.HasTarget()) {
+            std::cerr << "[!] No active target set. Usage: shared.activity <user1> <user2> [posts_per_account]" << std::endl;
+            return 1;
+        }
+
+        const bool numericArg = std::all_of(args[0].begin(), args[0].end(), [](char c) {
+            return std::isdigit(static_cast<unsigned char>(c));
+        });
+
+        if (numericArg) {
+            auto session = mgr.GetCurrentSession();
+            auto target = mgr.GetTarget();
+            nameA = session.username;
+            idA   = session.userId;
+            nameB = target.username;
+            idB   = target.userId;
+            try { postsPerAccount = std::stoi(args[0]); } catch (...) {}
+        } else {
+            auto target = mgr.GetTarget();
+            nameA = target.username;
+            idA   = target.userId;
+            nameB = args[0];
+            auto tB = resolveTarget(nameB);
+            if (!tB) { std::cerr << "[!] Could not load @" << nameB << std::endl; return 1; }
+            idB = tB->userId;
+        }
+    } else {
+        if (!mgr.HasTarget()) {
+            std::cerr << "[!] shared.activity: No target set. Usage: shared.activity <user1> <user2> [posts_per_account]" << std::endl;
+            return 1;
+        }
+        auto session = mgr.GetCurrentSession();
+        auto target = mgr.GetTarget();
+        nameA = session.username;
+        idA   = session.userId;
+        nameB = target.username;
+        idB   = target.userId;
+    }
+
+    std::cout << "[*] Building shared following list between @" << nameA << " and @" << nameB << "..." << std::endl;
+
+    auto followingA = mgr.FetchFollowing(idA);
+    auto followingB = mgr.FetchFollowing(idB);
+
+    std::map<std::string, IG::UserEntry> followingByNameA;
+    for (const auto& f : followingA) followingByNameA[f.username] = f;
+
+    std::vector<IG::UserEntry> sharedFollowing;
+    for (const auto& f : followingB) {
+        auto it = followingByNameA.find(f.username);
+        if (it != followingByNameA.end()) {
+            IG::UserEntry merged = it->second;
+            merged.isPrivate = merged.isPrivate || f.isPrivate;
+            if (merged.userId.empty()) merged.userId = f.userId;
+            sharedFollowing.push_back(merged);
+        }
+    }
+
+    if (sharedFollowing.empty()) {
+        std::cout << "[*] No shared followings found between @" << nameA << " and @" << nameB << std::endl;
+        return 0;
+    }
+
+    std::vector<IG::UserEntry> accountsToScan;
+    accountsToScan.reserve(sharedFollowing.size());
+    for (const auto& u : sharedFollowing) {
+        if (!u.isPrivate)
+            accountsToScan.push_back(u);
+    }
+
+    if (accountsToScan.empty()) {
+        std::cout << "[*] Shared followings exist, but all are private. Nothing to scan." << std::endl;
+        return 0;
+    }
+
+    const int toScan = static_cast<int>(accountsToScan.size()); // unlimited: scan all
+
+    std::cout << "[+] Shared followings: " << sharedFollowing.size()
+              << " | Public accounts to scan: " << toScan << std::endl;
+    std::cout << "[*] Scanning activity by @" << nameA << " and @" << nameB
+              << " across all shared public followings..." << std::endl << std::endl;
+
+    struct Activity {
+        std::string actor;
+        std::string accountOwner;
+        std::string type; // "comment" or "like"
+        std::string text; // comment text (empty for likes)
+        std::string postCaption;
+        std::string date;
+    };
+    std::vector<Activity> found;
+
+    for (int i = 0; i < toScan; i++) {
+        const auto& account = accountsToScan[i];
+        std::cout << "\r[*] Scanning @" << account.username << " (" << (i + 1) << "/" << toScan << ")..." << std::flush;
+
+        auto feed = mgr.FetchUserFeed(account.userId, postsPerAccount);
+        for (const auto& item : feed) {
+            if (item.commentCount > 0) {
+                auto comments = mgr.FetchMediaComments(item.mediaId);
+                for (const auto& c : comments) {
+                    if (c.username == nameA || c.username == nameB) {
+                        Activity a;
+                        a.actor = c.username;
+                        a.accountOwner = account.username;
+                        a.type = "comment";
+                        a.text = c.text;
+                        std::string cap = item.caption;
+                        if (cap.size() > 50) cap = cap.substr(0, 47) + "...";
+                        std::replace(cap.begin(), cap.end(), '\n', ' ');
+                        a.postCaption = cap;
+                        a.date = c.createdAt;
+                        found.push_back(a);
+                    }
+                }
+            }
+
+            if (item.likeCount > 0) {
+                auto likers = mgr.FetchMediaLikers(item.mediaId);
+                for (const auto& liker : likers) {
+                    if (liker.username == nameA || liker.username == nameB) {
+                        Activity a;
+                        a.actor = liker.username;
+                        a.accountOwner = account.username;
+                        a.type = "like";
+                        std::string cap = item.caption;
+                        if (cap.size() > 50) cap = cap.substr(0, 47) + "...";
+                        std::replace(cap.begin(), cap.end(), '\n', ' ');
+                        a.postCaption = cap;
+                        a.date = item.takenAt;
+                        found.push_back(a);
+                    }
+                }
+            }
+        }
+    }
+
+    std::cout << std::endl << std::endl;
+
+    if (found.empty()) {
+        std::cout << "[*] No matching activity found for @" << nameA << " or @" << nameB
+                  << " on shared public followings." << std::endl;
+        return 0;
+    }
+
+    std::map<std::string, std::vector<const Activity*>> groupedByActor;
+    for (const auto& a : found) groupedByActor[a.actor].push_back(&a);
+
+    std::cout << "[+] Found " << found.size() << " interaction(s) across shared followings:" << std::endl << std::endl;
+    for (const auto& [actor, activities] : groupedByActor) {
+        std::cout << "  @" << actor << " (" << activities.size() << " interaction"
+                  << (activities.size() > 1 ? "s" : "") << "):" << std::endl;
+        for (const auto* a : activities) {
+            std::cout << "    on @" << a->accountOwner << " -> ";
+            if (a->type == "comment") {
+                std::cout << "[Comment]";
+                if (!a->date.empty() && a->date != "0")
+                    std::cout << " " << formatTimestamp(a->date);
+                std::cout << ": \"" << a->text << "\"" << std::endl;
+            } else {
+                std::cout << "[Liked] " << (a->postCaption.empty() ? "(no caption)" : a->postCaption) << std::endl;
+            }
+        }
+        std::cout << std::endl;
+    }
+
+    return 0;
+}
+
+// ============================================================================
 // Command: u.mentions - find @target mentions in captions/comments of others
 // ============================================================================
 static int cmd_umentions(const std::vector<std::string>& args) {
@@ -1577,6 +1779,7 @@ static const std::map<std::string, InstaFunc> instaFuncMap = {
     {"u.comments",    cmd_ucomments},
     {"u.tagged",      cmd_utagged},
     {"u.activity",    cmd_uactivity},
+    {"shared.activity", cmd_shared_activity},
     {"u.mentions",    cmd_umentions},
     {"fans",          cmd_fans},
     {"shared",        cmd_shared},
