@@ -197,7 +197,7 @@
                 },
                 {
                     "cmd": "shared.activity",
-                    "description": "Scan all shared public followings for comments/likes by two targets",
+                    "description": "Scan shared followings (public + private you follow) for comments/likes by two targets",
                     "exec_symbol": "cmd_handle"
                 }
             ]
