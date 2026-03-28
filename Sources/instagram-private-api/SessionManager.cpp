@@ -417,6 +417,10 @@ namespace IG {
             return false;
         }
 
+        std::cerr << "[DBG] CSRF: OK, Encryption key: "
+                  << (_encPubKey.empty() ? "NOT FOUND (password sent unencrypted)" : "OK (encrypted)")
+                  << std::endl;
+
         // ------------------------------------------------------------------
         // Step 2: Build enc_password
         // ------------------------------------------------------------------
@@ -495,18 +499,28 @@ namespace IG {
             // Update CSRF token if it changed
             ParseLoginCookies(loginResp.headers);
 
-            // Debug: show what cookies we captured
-            std::cerr << "[DBG] Session cookies:" << std::endl;
-            std::cerr << "  sessionid: " << (_currentUser.sessionId.empty() ? "(EMPTY)" : _currentUser.sessionId.substr(0, 10) + "...") << std::endl;
-            std::cerr << "  csrftoken: " << (_currentUser.csrfToken.empty() ? "(EMPTY)" : _currentUser.csrfToken.substr(0, 10) + "...") << std::endl;
-            std::cerr << "  ds_user_id: " << (_currentUser.dsUserId.empty() ? "(EMPTY)" : _currentUser.dsUserId) << std::endl;
-            std::cerr << "  mid: " << (_currentUser.mid.empty() ? "(EMPTY)" : _currentUser.mid.substr(0, 10) + "...") << std::endl;
+            // Debug: show session state
+            std::cerr << "[DBG] Session: sessionid="
+                      << (_currentUser.sessionId.empty() ? "EMPTY" : "OK")
+                      << ", csrftoken="
+                      << (_currentUser.csrfToken.empty() ? "EMPTY" : "OK")
+                      << ", ds_user_id=" << _currentUser.dsUserId
+                      << ", enc_key=" << (_encPubKey.empty() ? "NONE" : "OK")
+                      << std::endl;
 
-            // Verify session actually works
+            // Quick verify — test an authenticated endpoint
             ResponseData verifyResp = MakeAuthenticatedRequest(API_BASE + "/accounts/current_user/?edit=true");
             std::string verifyBody = GetResponseBody(verifyResp);
-            std::cerr << "[DBG] Session verify: HTTP " << verifyResp.statusCode
-                      << ", body=" << verifyBody.size() << "B" << std::endl;
+            std::cerr << "[DBG] Verify /current_user: HTTP " << verifyResp.statusCode
+                      << " (" << verifyBody.size() << "B)" << std::endl;
+            if (verifyResp.statusCode == 200 && !verifyBody.empty()) {
+                std::cerr << "[+] Session fully authenticated." << std::endl;
+            } else if (verifyResp.statusCode == 429) {
+                std::cerr << "[*] Verify skipped (rate limited), session assumed valid." << std::endl;
+            } else {
+                std::cerr << "[!] Warning: verify returned HTTP " << verifyResp.statusCode
+                          << " — session may have limited access." << std::endl;
+            }
 
             SaveSessionToFile();
             return true;
