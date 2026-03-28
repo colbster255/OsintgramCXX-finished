@@ -8,6 +8,8 @@
 #include <iomanip>
 #include <chrono>
 #include <thread>
+#include <fstream>
+#include <filesystem>
 
 // OpenSSL for password encryption
 #include <openssl/rsa.h>
@@ -338,6 +340,11 @@ namespace IG {
     bool SessionManager::Login(const std::string& username, const std::string& password) {
         std::lock_guard<std::mutex> lock(_mutex);
 
+        // Try to resume a saved session first
+        if (LoadSessionFromFile(username)) {
+            return true;
+        }
+
         _currentUser         = UserSession{};
         _currentUser.username  = username;
         _currentUser.userAgent = WEB_USER_AGENT;
@@ -465,6 +472,7 @@ namespace IG {
             _currentUser.authenticated = true;
             // Update CSRF token if it changed
             ParseLoginCookies(loginResp.headers);
+            SaveSessionToFile();
             return true;
         }
 
@@ -584,6 +592,7 @@ namespace IG {
                 _currentUser.userId        = respJson.value("userId", _currentUser.dsUserId);
                 _currentUser.authenticated = true;
                 std::cout << "[+] 2FA verified successfully." << std::endl;
+                SaveSessionToFile();
                 return true;
             }
 
@@ -593,6 +602,7 @@ namespace IG {
                 _currentUser.userId = std::to_string(u.value("pk", 0LL));
                 _currentUser.authenticated = true;
                 std::cout << "[+] 2FA verified successfully." << std::endl;
+                SaveSessionToFile();
                 return true;
             }
 
@@ -621,9 +631,119 @@ namespace IG {
                                          "one_click_logout=&user_id=" + _currentUser.dsUserId);
             } catch (...) {}
         }
+        // Delete saved session file
+        try {
+            std::string path = GetSessionFilePath();
+            if (!path.empty() && std::filesystem::exists(path))
+                std::filesystem::remove(path);
+        } catch (...) {}
         _currentUser  = UserSession{};
         _currentTarget = TargetInfo{};
         _hasTarget    = false;
+    }
+
+    // Helper: extract body string from a response
+    static std::string GetResponseBody(const ResponseData& resp) {
+        try { return std::get<ByteData>(resp.body); } catch (...) { return ""; }
+    }
+
+    // -------------------------------------------------------------------------
+    // Session persistence — save/load cookies to avoid repeated logins
+    // -------------------------------------------------------------------------
+    std::string SessionManager::GetSessionFilePath() const {
+        namespace fs = std::filesystem;
+        std::string homeDir;
+#ifdef _WIN32
+        const char* userProfile = std::getenv("USERPROFILE");
+        homeDir = userProfile ? userProfile : "C:\\Users\\Default";
+        std::string dir = homeDir + "\\OsintgramCXX\\sessions";
+#else
+        const char* home = std::getenv("HOME");
+        homeDir = home ? home : "/tmp";
+        std::string dir = homeDir + "/.config/OsintgramCXX/sessions";
+#endif
+        try { fs::create_directories(dir); } catch (...) {}
+        return dir + "/" + _currentUser.username + ".session";
+    }
+
+    void SessionManager::SaveSessionToFile() {
+        std::string path = GetSessionFilePath();
+        if (path.empty()) return;
+        try {
+            json sess;
+            sess["username"]  = _currentUser.username;
+            sess["userId"]    = _currentUser.userId;
+            sess["sessionId"] = _currentUser.sessionId;
+            sess["csrfToken"] = _currentUser.csrfToken;
+            sess["mid"]       = _currentUser.mid;
+            sess["dsUserId"]  = _currentUser.dsUserId;
+            sess["userAgent"] = _currentUser.userAgent;
+            sess["savedAt"]   = std::time(nullptr);
+            std::ofstream out(path);
+            out << sess.dump(2);
+        } catch (...) {}
+    }
+
+    bool SessionManager::LoadSessionFromFile(const std::string& username) {
+        namespace fs = std::filesystem;
+        // Build path manually since _currentUser may not be set yet
+        std::string homeDir;
+#ifdef _WIN32
+        const char* userProfile = std::getenv("USERPROFILE");
+        homeDir = userProfile ? userProfile : "C:\\Users\\Default";
+        std::string path = homeDir + "\\OsintgramCXX\\sessions\\" + username + ".session";
+#else
+        const char* home = std::getenv("HOME");
+        homeDir = home ? home : "/tmp";
+        std::string path = homeDir + "/.config/OsintgramCXX/sessions/" + username + ".session";
+#endif
+        if (!fs::exists(path)) return false;
+
+        try {
+            std::ifstream in(path);
+            std::string content((std::istreambuf_iterator<char>(in)),
+                                 std::istreambuf_iterator<char>());
+            json sess = json::parse(content);
+
+            // Check if session is not too old (max 7 days)
+            long long savedAt = sess.value("savedAt", 0LL);
+            long long now = std::time(nullptr);
+            if (now - savedAt > 7 * 24 * 3600) {
+                std::cerr << "[*] Saved session expired, need fresh login." << std::endl;
+                fs::remove(path);
+                return false;
+            }
+
+            _currentUser.username  = sess.value("username",  "");
+            _currentUser.userId    = sess.value("userId",    "");
+            _currentUser.sessionId = sess.value("sessionId", "");
+            _currentUser.csrfToken = sess.value("csrfToken", "");
+            _currentUser.mid       = sess.value("mid",       "");
+            _currentUser.dsUserId  = sess.value("dsUserId",  "");
+            _currentUser.userAgent = sess.value("userAgent", WEB_USER_AGENT);
+            _currentUser.authenticated = true;
+
+            // Verify the session is still valid with a quick API call
+            ResponseData resp = MakeAuthenticatedRequest(API_BASE + "/accounts/current_user/?edit=true");
+            std::string body = GetResponseBody(resp);
+            if (resp.statusCode >= 200 && resp.statusCode < 300 && !body.empty()) {
+                try {
+                    json check = json::parse(body);
+                    if (check.contains("user")) {
+                        std::cerr << "[+] Resumed saved session for '" << username << "'" << std::endl;
+                        return true;
+                    }
+                } catch (...) {}
+            }
+
+            // Session invalid, clear it
+            _currentUser = UserSession{};
+            fs::remove(path);
+            std::cerr << "[*] Saved session invalid, need fresh login." << std::endl;
+            return false;
+        } catch (...) {
+            return false;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -674,10 +794,6 @@ namespace IG {
     // -------------------------------------------------------------------------
     // Fetch user info  (web endpoints)
     // -------------------------------------------------------------------------
-    // Helper: extract body string from a response
-    static std::string GetResponseBody(const ResponseData& resp) {
-        try { return std::get<ByteData>(resp.body); } catch (...) { return ""; }
-    }
 
     std::optional<TargetInfo> SessionManager::FetchUserInfo(const std::string& username) {
         std::string body;
@@ -752,37 +868,38 @@ namespace IG {
             if (!gqlResp.empty() && gqlResp[0] == '{') {
                 try {
                     json gql = json::parse(gqlResp);
-                    // Extract user ID from reel data: data.user.reel.user.id or data.user.id
                     if (gql.contains("data") && gql["data"].contains("user") &&
                         gql["data"]["user"].is_object()) {
                         auto& usr = gql["data"]["user"];
-                        // Try direct id field
-                        if (usr.contains("id")) {
-                            discoveredUserId = usr["id"].is_string()
-                                ? usr["id"].get<std::string>()
-                                : std::to_string(usr.value("id", 0LL));
-                        }
-                        // Try nested reel.user.id
-                        if (discoveredUserId.empty() || discoveredUserId == "0") {
-                            if (usr.contains("reel") && usr["reel"].contains("user") &&
-                                usr["reel"]["user"].contains("id")) {
-                                auto& reelUser = usr["reel"]["user"];
-                                discoveredUserId = reelUser["id"].is_string()
-                                    ? reelUser["id"].get<std::string>()
-                                    : std::to_string(reelUser.value("id", 0LL));
+
+                        // Helper to extract ID and verify it belongs to the target user
+                        auto extractIdIfMatch = [&](const json& userObj) -> std::string {
+                            // Check username matches target (if present)
+                            if (userObj.contains("username")) {
+                                std::string retUsername = userObj.value("username", "");
+                                if (!retUsername.empty() && retUsername != username) {
+                                    std::cerr << "[DBG] GraphQL returned '" << retUsername
+                                              << "' instead of '" << username << "', skipping" << std::endl;
+                                    return "";
+                                }
                             }
-                        }
-                        // Try reel.id directly (it's the user ID)
-                        if (discoveredUserId.empty() || discoveredUserId == "0") {
-                            if (usr.contains("reel") && usr["reel"].contains("id")) {
-                                discoveredUserId = usr["reel"]["id"].is_string()
-                                    ? usr["reel"]["id"].get<std::string>()
-                                    : std::to_string(usr["reel"].value("id", 0LL));
-                            }
-                        }
+                            if (userObj.contains("id"))
+                                return userObj["id"].is_string()
+                                    ? userObj["id"].get<std::string>()
+                                    : std::to_string(userObj.value("id", 0LL));
+                            return "";
+                        };
+
+                        // Try reel.user first (most common in this response format)
+                        if (usr.contains("reel") && usr["reel"].contains("user"))
+                            discoveredUserId = extractIdIfMatch(usr["reel"]["user"]);
+                        // Try direct user object
+                        if (discoveredUserId.empty() || discoveredUserId == "0")
+                            discoveredUserId = extractIdIfMatch(usr);
 
                         // If the user object has full profile data, use it
-                        if (usr.contains("username") && usr.contains("biography")) {
+                        if (usr.contains("username") && usr.value("username", "") == username &&
+                            usr.contains("biography")) {
                             body = gql.dump();
                         }
                     }

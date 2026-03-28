@@ -136,6 +136,11 @@ namespace IG {
         void ParseLoginCookies(const Headers& responseHeaders);
         std::string ExtractCookieValue(const std::string& cookieHeader, const std::string& name);
 
+        // Session persistence
+        std::string GetSessionFilePath() const;
+        void SaveSessionToFile();
+        bool LoadSessionFromFile(const std::string& username);
+
         // State
         UserSession _currentUser;
         TargetInfo _currentTarget;
