@@ -986,10 +986,25 @@ namespace IG {
             // Friendship status (from /users/{id}/info/ response)
             if (userJson.contains("friendship_status")) {
                 info.isFollowing = userJson["friendship_status"].value("following", false);
-                std::cerr << "[DBG] friendship_status: following="
-                          << (info.isFollowing ? "true" : "false") << std::endl;
             } else {
-                std::cerr << "[DBG] No friendship_status in response" << std::endl;
+                // Some responses put it at different levels — search for it
+                // Also check the raw parsed data object
+                if (data.contains("friendship_status")) {
+                    info.isFollowing = data["friendship_status"].value("following", false);
+                } else {
+                    // Try a friendship API call to check directly
+                    if (!info.userId.empty()) {
+                        std::string fUrl = API_BASE + "/friendships/show/" + info.userId + "/";
+                        ResponseData fResp = MakeAuthenticatedRequest(fUrl);
+                        std::string fBody = GetResponseBody(fResp);
+                        if (!fBody.empty()) {
+                            try {
+                                json fData = json::parse(fBody);
+                                info.isFollowing = fData.value("following", false);
+                            } catch (...) {}
+                        }
+                    }
+                }
             }
 
             // Validate we got at least a user ID
