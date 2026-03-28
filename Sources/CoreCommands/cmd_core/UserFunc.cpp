@@ -64,11 +64,6 @@ static void showUsage() {
 }
 
 static int doLogin(const std::vector<std::string>& args) {
-    if (args.size() < 2) {
-        std::cerr << "[!] Usage: userctl login <username>" << std::endl;
-        return 1;
-    }
-
     auto& mgr = IG::SessionManager::Instance();
 
     if (mgr.IsLoggedIn()) {
@@ -77,8 +72,27 @@ static int doLogin(const std::vector<std::string>& args) {
         return 1;
     }
 
-    std::string username = args[1];
+    std::string username;
 
+    if (args.size() >= 2) {
+        username = args[1];
+    } else {
+        // No username given — try to auto-load last saved session
+        username = mgr.GetLastSavedUsername();
+        if (username.empty()) {
+            std::cerr << "[!] Usage: userctl login <username>" << std::endl;
+            return 1;
+        }
+    }
+
+    // Try to resume a saved session first (no password needed)
+    if (mgr.TryResumeSession(username)) {
+        std::cout << "[+] Resumed session as '" << username << "'" << std::endl;
+        std::cout << "[*] You can now set a target with: sessionctl target <username>" << std::endl;
+        return 0;
+    }
+
+    // No saved session — need password
     std::cout << "[*] Password for '" << username << "': ";
     std::string password = readPassword();
 

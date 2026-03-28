@@ -35,18 +35,10 @@ namespace IG {
     }
 
     // -------------------------------------------------------------------------
-    // Destructor – auto-logout on program exit to avoid stale sessions
+    // Destructor – keep session alive (no logout on exit)
     // -------------------------------------------------------------------------
     SessionManager::~SessionManager() {
-        if (_currentUser.authenticated) {
-            try {
-                // Fire-and-forget logout so Instagram doesn't accumulate sessions
-                MakeAuthenticatedRequest(WEB_BASE + "/accounts/logout/ajax/",
-                                         RequestMethod::REQ_POST,
-                                         "one_click_logout=&user_id=" + _currentUser.dsUserId);
-            } catch (...) {}
-            _currentUser.authenticated = false;
-        }
+        // Session stays valid — will be reused next launch
     }
 
     // -------------------------------------------------------------------------
@@ -337,13 +329,43 @@ namespace IG {
     // -------------------------------------------------------------------------
     // Login  (web flow via www.instagram.com)
     // -------------------------------------------------------------------------
+    bool SessionManager::TryResumeSession(const std::string& username) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return LoadSessionFromFile(username);
+    }
+
+    std::string SessionManager::GetLastSavedUsername() const {
+        namespace fs = std::filesystem;
+        std::string homeDir;
+#ifdef _WIN32
+        const char* userProfile = std::getenv("USERPROFILE");
+        homeDir = userProfile ? userProfile : "";
+        std::string dir = homeDir + "\\OsintgramCXX\\sessions";
+#else
+        const char* home = std::getenv("HOME");
+        homeDir = home ? home : "";
+        std::string dir = homeDir + "/.config/OsintgramCXX/sessions";
+#endif
+        if (homeDir.empty() || !fs::exists(dir)) return "";
+
+        // Find the most recently modified .session file
+        std::string latest;
+        std::filesystem::file_time_type latestTime{};
+        try {
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                if (entry.path().extension() == ".session") {
+                    if (latest.empty() || entry.last_write_time() > latestTime) {
+                        latest = entry.path().stem().string();
+                        latestTime = entry.last_write_time();
+                    }
+                }
+            }
+        } catch (...) {}
+        return latest;
+    }
+
     bool SessionManager::Login(const std::string& username, const std::string& password) {
         std::lock_guard<std::mutex> lock(_mutex);
-
-        // Try to resume a saved session first
-        if (LoadSessionFromFile(username)) {
-            return true;
-        }
 
         _currentUser         = UserSession{};
         _currentUser.username  = username;

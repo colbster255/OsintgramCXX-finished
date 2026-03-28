@@ -90,10 +90,12 @@ namespace IG {
 
         // Authentication
         bool Login(const std::string& username, const std::string& password);
+        bool TryResumeSession(const std::string& username);
         void Logout();
         bool IsLoggedIn() const;
         std::string GetCurrentUsername() const;
         UserSession GetCurrentSession() const;
+        std::string GetLastSavedUsername() const;
 
         // Target management
         bool SetTarget(const std::string& username);
