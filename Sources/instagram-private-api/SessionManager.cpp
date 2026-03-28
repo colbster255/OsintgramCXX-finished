@@ -1071,6 +1071,30 @@ namespace IG {
     // -------------------------------------------------------------------------
     // Followers / Following
     // -------------------------------------------------------------------------
+    // Helper: extract pk/id as string regardless of whether JSON stores it as int or string
+    static std::string ExtractPk(const json& obj) {
+        if (obj.contains("pk")) {
+            const auto& v = obj["pk"];
+            if (v.is_string()) return v.get<std::string>();
+            if (v.is_number()) return std::to_string(v.get<long long>());
+        }
+        if (obj.contains("id")) {
+            const auto& v = obj["id"];
+            if (v.is_string()) return v.get<std::string>();
+            if (v.is_number()) return std::to_string(v.get<long long>());
+        }
+        return "";
+    }
+
+    // Helper: extract next_max_id regardless of type
+    static std::string ExtractNextMaxId(const json& data) {
+        if (!data.contains("next_max_id") || data["next_max_id"].is_null()) return "";
+        const auto& v = data["next_max_id"];
+        if (v.is_string()) return v.get<std::string>();
+        if (v.is_number()) return std::to_string(v.get<long long>());
+        return "";
+    }
+
     std::vector<UserEntry> SessionManager::FetchFollowers(const std::string& userId, int maxCount) {
         std::vector<UserEntry> results;
         std::string nextMaxId;
@@ -1079,15 +1103,22 @@ namespace IG {
             std::string url = API_BASE + "/friendships/" + userId + "/followers/?count=50&search_surface=follow_list_page";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
+            std::string body = GetResponseBody(resp);
+            std::cerr << "[DBG] FetchFollowers HTTP " << resp.statusCode
+                      << ", body=" << body.size() << "B"
+                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
-                json data = json::parse(std::get<ByteData>(resp.body));
-                if (!data.contains("users")) break;
+                json data = json::parse(body);
+                if (!data.contains("users") || !data["users"].is_array()) {
+                    std::cerr << "[DBG] FetchFollowers: no 'users' array in response" << std::endl;
+                    break;
+                }
                 for (const auto& u : data["users"]) {
                     if (fetched >= maxCount) break;
                     UserEntry e;
                     e.username      = u.value("username",       "");
-                    e.userId        = std::to_string(u.value("pk", 0LL));
+                    e.userId        = ExtractPk(u);
                     e.fullName      = u.value("full_name",       "");
                     e.profilePicUrl = u.value("profile_pic_url","");
                     e.isPrivate     = u.value("is_private",      false);
@@ -1095,10 +1126,12 @@ namespace IG {
                     results.push_back(e);
                     fetched++;
                 }
-                if (data.contains("next_max_id") && !data["next_max_id"].is_null())
-                    nextMaxId = data["next_max_id"].get<std::string>();
-                else break;
-            } catch (...) { break; }
+                nextMaxId = ExtractNextMaxId(data);
+                if (nextMaxId.empty()) break;
+            } catch (const std::exception& ex) {
+                std::cerr << "[DBG] FetchFollowers parse error: " << ex.what() << std::endl;
+                break;
+            }
         }
         return results;
     }
@@ -1111,15 +1144,22 @@ namespace IG {
             std::string url = API_BASE + "/friendships/" + userId + "/following/?count=50";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
+            std::string body = GetResponseBody(resp);
+            std::cerr << "[DBG] FetchFollowing HTTP " << resp.statusCode
+                      << ", body=" << body.size() << "B"
+                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
-                json data = json::parse(std::get<ByteData>(resp.body));
-                if (!data.contains("users")) break;
+                json data = json::parse(body);
+                if (!data.contains("users") || !data["users"].is_array()) {
+                    std::cerr << "[DBG] FetchFollowing: no 'users' array in response" << std::endl;
+                    break;
+                }
                 for (const auto& u : data["users"]) {
                     if (fetched >= maxCount) break;
                     UserEntry e;
                     e.username      = u.value("username",       "");
-                    e.userId        = std::to_string(u.value("pk", 0LL));
+                    e.userId        = ExtractPk(u);
                     e.fullName      = u.value("full_name",       "");
                     e.profilePicUrl = u.value("profile_pic_url","");
                     e.isPrivate     = u.value("is_private",      false);
@@ -1127,10 +1167,12 @@ namespace IG {
                     results.push_back(e);
                     fetched++;
                 }
-                if (data.contains("next_max_id") && !data["next_max_id"].is_null())
-                    nextMaxId = data["next_max_id"].get<std::string>();
-                else break;
-            } catch (...) { break; }
+                nextMaxId = ExtractNextMaxId(data);
+                if (nextMaxId.empty()) break;
+            } catch (const std::exception& ex) {
+                std::cerr << "[DBG] FetchFollowing parse error: " << ex.what() << std::endl;
+                break;
+            }
         }
         return results;
     }
@@ -1146,18 +1188,29 @@ namespace IG {
             std::string url = API_BASE + "/feed/user/" + userId + "/?count=12";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
+            std::string body = GetResponseBody(resp);
+            std::cerr << "[DBG] FetchUserFeed HTTP " << resp.statusCode
+                      << ", body=" << body.size() << "B"
+                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
-                json data = json::parse(std::get<ByteData>(resp.body));
-                if (!data.contains("items")) break;
+                json data = json::parse(body);
+                if (!data.contains("items") || !data["items"].is_array()) {
+                    std::cerr << "[DBG] FetchUserFeed: no 'items' array in response" << std::endl;
+                    break;
+                }
                 for (const auto& item : data["items"]) {
                     if (fetched >= maxCount) break;
                     MediaItem m;
-                    m.mediaId      = std::to_string(item.value("pk", 0LL));
+                    m.mediaId      = ExtractPk(item);
                     m.shortcode    = item.value("code", "");
                     m.likeCount    = item.value("like_count",    0);
                     m.commentCount = item.value("comment_count", 0);
-                    m.takenAt      = std::to_string(item.value("taken_at", 0LL));
+                    // taken_at may be int or string
+                    if (item.contains("taken_at")) {
+                        const auto& ta = item["taken_at"];
+                        m.takenAt = ta.is_string() ? ta.get<std::string>() : std::to_string(ta.get<long long>());
+                    }
                     if (item.contains("caption") && !item["caption"].is_null())
                         m.caption = item["caption"].value("text", "");
                     int mt = item.value("media_type", 1);
@@ -1186,10 +1239,12 @@ namespace IG {
                     fetched++;
                 }
                 if (!data.value("more_available", false)) break;
-                if (data.contains("next_max_id") && !data["next_max_id"].is_null())
-                    nextMaxId = std::to_string(data["next_max_id"].get<long long>());
-                else break;
-            } catch (...) { break; }
+                nextMaxId = ExtractNextMaxId(data);
+                if (nextMaxId.empty()) break;
+            } catch (const std::exception& ex) {
+                std::cerr << "[DBG] FetchUserFeed parse error: " << ex.what() << std::endl;
+                break;
+            }
         }
         return items;
     }
