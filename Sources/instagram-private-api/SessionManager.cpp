@@ -423,10 +423,6 @@ namespace IG {
             return false;
         }
 
-        std::cerr << "[DBG] CSRF: OK, Encryption key: "
-                  << (_encPubKey.empty() ? "NOT FOUND (password sent unencrypted)" : "OK (encrypted)")
-                  << std::endl;
-
         // ------------------------------------------------------------------
         // Step 2: Build enc_password
         // ------------------------------------------------------------------
@@ -505,20 +501,9 @@ namespace IG {
             // Update CSRF token if it changed
             ParseLoginCookies(loginResp.headers);
 
-            // Debug: show session state
-            std::cerr << "[DBG] Session: sessionid="
-                      << (_currentUser.sessionId.empty() ? "EMPTY" : "OK")
-                      << ", csrftoken="
-                      << (_currentUser.csrfToken.empty() ? "EMPTY" : "OK")
-                      << ", ds_user_id=" << _currentUser.dsUserId
-                      << ", enc_key=" << (_encPubKey.empty() ? "NONE" : "OK")
-                      << std::endl;
-
             // Quick verify — test an authenticated endpoint
             ResponseData verifyResp = MakeAuthenticatedRequest(API_BASE + "/accounts/current_user/?edit=true");
             std::string verifyBody = GetResponseBody(verifyResp);
-            std::cerr << "[DBG] Verify /current_user: HTTP " << verifyResp.statusCode
-                      << " (" << verifyBody.size() << "B)" << std::endl;
             if (verifyResp.statusCode == 200 && !verifyBody.empty()) {
                 std::cerr << "[+] Session fully authenticated." << std::endl;
             } else if (verifyResp.statusCode == 429) {
@@ -868,8 +853,6 @@ namespace IG {
                 std::cerr << "[+] web_profile_info: HTTP " << status
                           << ", body=" << body.size() << "B" << std::endl;
             } else {
-                std::cerr << "[DBG] web_profile_info: HTTP " << status
-                          << ", body=" << body.size() << "B" << std::endl;
                 body.clear();
             }
         }
@@ -880,9 +863,6 @@ namespace IG {
             ResponseData resp = MakeAuthenticatedRequest(url);
             status = resp.statusCode;
             std::string respBody = GetResponseBody(resp);
-
-            std::cerr << "[DBG] __a=1: HTTP " << status
-                      << ", body=" << respBody.size() << "B" << std::endl;
 
             if (!respBody.empty() && respBody[0] == '{') {
                 try {
@@ -904,9 +884,6 @@ namespace IG {
             ResponseData resp = MakeAuthenticatedRequest(searchUrl);
             status = resp.statusCode;
             std::string searchResp = GetResponseBody(resp);
-
-            std::cerr << "[DBG] topsearch: HTTP " << status
-                      << ", body=" << searchResp.size() << "B" << std::endl;
 
             std::string discoveredUserId;
             if (!searchResp.empty() && searchResp[0] == '{') {
@@ -940,9 +917,6 @@ namespace IG {
                 ResponseData infoResp = MakeAuthenticatedRequest(infoUrl);
                 status = infoResp.statusCode;
                 std::string infoBody = GetResponseBody(infoResp);
-
-                std::cerr << "[DBG] users/info: HTTP " << status
-                          << ", body=" << infoBody.size() << "B" << std::endl;
 
                 if (!infoBody.empty() && infoBody[0] == '{') {
                     try {
@@ -1042,9 +1016,6 @@ namespace IG {
                         std::string fUrl = API_BASE + "/friendships/show/" + info.userId + "/";
                         ResponseData fResp = MakeAuthenticatedRequest(fUrl);
                         std::string fBody = GetResponseBody(fResp);
-                        std::cerr << "[DBG] friendships/show: HTTP " << fResp.statusCode
-                                  << ", body=" << fBody.size() << "B"
-                                  << ", content: " << fBody.substr(0, 300) << std::endl;
                         if (!fBody.empty()) {
                             try {
                                 json fData = json::parse(fBody);
@@ -1106,14 +1077,10 @@ namespace IG {
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             std::string body = GetResponseBody(resp);
-            std::cerr << "[DBG] FetchFollowers HTTP " << resp.statusCode
-                      << ", body=" << body.size() << "B"
-                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(body);
                 if (!data.contains("users") || !data["users"].is_array()) {
-                    std::cerr << "[DBG] FetchFollowers: no 'users' array in response" << std::endl;
                     break;
                 }
                 for (const auto& u : data["users"]) {
@@ -1131,7 +1098,6 @@ namespace IG {
                 nextMaxId = ExtractNextMaxId(data);
                 if (nextMaxId.empty()) break;
             } catch (const std::exception& ex) {
-                std::cerr << "[DBG] FetchFollowers parse error: " << ex.what() << std::endl;
                 break;
             }
         }
@@ -1148,14 +1114,10 @@ namespace IG {
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             std::string body = GetResponseBody(resp);
-            std::cerr << "[DBG] FetchFollowing HTTP " << resp.statusCode
-                      << ", body=" << body.size() << "B"
-                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(body);
                 if (!data.contains("users") || !data["users"].is_array()) {
-                    std::cerr << "[DBG] FetchFollowing: no 'users' array in response" << std::endl;
                     break;
                 }
                 for (const auto& u : data["users"]) {
@@ -1173,7 +1135,6 @@ namespace IG {
                 nextMaxId = ExtractNextMaxId(data);
                 if (nextMaxId.empty()) break;
             } catch (const std::exception& ex) {
-                std::cerr << "[DBG] FetchFollowing parse error: " << ex.what() << std::endl;
                 break;
             }
         }
@@ -1183,71 +1144,199 @@ namespace IG {
     // -------------------------------------------------------------------------
     // Feed
     // -------------------------------------------------------------------------
+    // Helper: parse a single media item from the v1 API format
+    // -------------------------------------------------------------------------
+    static MediaItem ParseV1MediaItem(const json& item) {
+        MediaItem m;
+        m.mediaId      = ExtractPk(item);
+        m.shortcode    = item.value("code", "");
+        m.likeCount    = item.value("like_count",    0);
+        m.commentCount = item.value("comment_count", 0);
+        if (item.contains("taken_at")) {
+            const auto& ta = item["taken_at"];
+            m.takenAt = ta.is_string() ? ta.get<std::string>() : std::to_string(ta.get<long long>());
+        }
+        if (item.contains("caption") && !item["caption"].is_null())
+            m.caption = item["caption"].value("text", "");
+        int mt = item.value("media_type", 1);
+        m.mediaType = (mt == 2) ? "video" : (mt == 8) ? "carousel" : "photo";
+        if (item.contains("image_versions2") &&
+            item["image_versions2"].contains("candidates") &&
+            !item["image_versions2"]["candidates"].empty())
+            m.imageUrl = item["image_versions2"]["candidates"][0].value("url","");
+        if (item.contains("video_versions") && !item["video_versions"].empty())
+            m.videoUrl = item["video_versions"][0].value("url","");
+        if (item.contains("location") && !item["location"].is_null()) {
+            m.location        = item["location"].value("name","");
+            m.locationAddress = item["location"].value("address","");
+        }
+        if (item.contains("usertags") && item["usertags"].contains("in"))
+            for (const auto& tag : item["usertags"]["in"])
+                if (tag.contains("user"))
+                    m.taggedUsers.push_back(tag["user"].value("username",""));
+        if (!m.caption.empty()) {
+            std::regex hashRx("#(\\w+)");
+            auto beg = std::sregex_iterator(m.caption.begin(), m.caption.end(), hashRx);
+            for (auto it = beg; it != std::sregex_iterator(); ++it)
+                m.hashtags.push_back(it->str());
+        }
+        return m;
+    }
+
+    // -------------------------------------------------------------------------
+    // Helper: parse a single media node from the GraphQL (edge) format
+    // -------------------------------------------------------------------------
+    static MediaItem ParseGraphQLMediaNode(const json& node) {
+        MediaItem m;
+        m.mediaId   = node.value("id", "");
+        m.shortcode = node.value("shortcode", "");
+        if (node.contains("edge_liked_by"))
+            m.likeCount = node["edge_liked_by"].value("count", 0);
+        else if (node.contains("edge_media_preview_like"))
+            m.likeCount = node["edge_media_preview_like"].value("count", 0);
+        if (node.contains("edge_media_to_comment"))
+            m.commentCount = node["edge_media_to_comment"].value("count", 0);
+        if (node.contains("taken_at_timestamp")) {
+            const auto& ta = node["taken_at_timestamp"];
+            m.takenAt = ta.is_string() ? ta.get<std::string>() : std::to_string(ta.get<long long>());
+        }
+        if (node.contains("edge_media_to_caption") &&
+            node["edge_media_to_caption"].contains("edges") &&
+            !node["edge_media_to_caption"]["edges"].empty())
+            m.caption = node["edge_media_to_caption"]["edges"][0]["node"].value("text", "");
+        bool isVideo = node.value("is_video", false);
+        std::string typeName = node.value("__typename", "");
+        if (typeName == "GraphSidecar" || typeName == "XDTGraphSidecar") m.mediaType = "carousel";
+        else if (isVideo) m.mediaType = "video";
+        else m.mediaType = "photo";
+        m.imageUrl = node.value("display_url", "");
+        if (isVideo) m.videoUrl = node.value("video_url", "");
+        if (node.contains("location") && !node["location"].is_null())
+            m.location = node["location"].value("name", "");
+        if (node.contains("edge_media_to_tagged_user") &&
+            node["edge_media_to_tagged_user"].contains("edges"))
+            for (const auto& e : node["edge_media_to_tagged_user"]["edges"])
+                if (e.contains("node") && e["node"].contains("user"))
+                    m.taggedUsers.push_back(e["node"]["user"].value("username",""));
+        if (!m.caption.empty()) {
+            std::regex hashRx("#(\\w+)");
+            auto beg = std::sregex_iterator(m.caption.begin(), m.caption.end(), hashRx);
+            for (auto it = beg; it != std::sregex_iterator(); ++it)
+                m.hashtags.push_back(it->str());
+        }
+        return m;
+    }
+
+    // -------------------------------------------------------------------------
+    // Feed — multi-strategy: v1 API → graphql → web profile scrape
+    // -------------------------------------------------------------------------
     std::vector<MediaItem> SessionManager::FetchUserFeed(const std::string& userId, int maxCount) {
         if (maxCount <= 0) maxCount = INT_MAX;
         std::vector<MediaItem> items;
         std::string nextMaxId;
         int fetched = 0;
+
+        // --- Strategy 1: v1 /feed/user/{id}/ (works for mobile sessions) ---
         while (fetched < maxCount) {
             std::string url = API_BASE + "/feed/user/" + userId + "/?count=12";
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             std::string body = GetResponseBody(resp);
-            std::cerr << "[DBG] FetchUserFeed HTTP " << resp.statusCode
-                      << ", body=" << body.size() << "B"
-                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(body);
-                if (!data.contains("items") || !data["items"].is_array()) {
-                    std::cerr << "[DBG] FetchUserFeed: no 'items' array in response" << std::endl;
-                    break;
-                }
+                if (!data.contains("items") || !data["items"].is_array() || data["items"].empty())
+                    break; // not in v1 format or empty — try next strategy
                 for (const auto& item : data["items"]) {
                     if (fetched >= maxCount) break;
-                    MediaItem m;
-                    m.mediaId      = ExtractPk(item);
-                    m.shortcode    = item.value("code", "");
-                    m.likeCount    = item.value("like_count",    0);
-                    m.commentCount = item.value("comment_count", 0);
-                    // taken_at may be int or string
-                    if (item.contains("taken_at")) {
-                        const auto& ta = item["taken_at"];
-                        m.takenAt = ta.is_string() ? ta.get<std::string>() : std::to_string(ta.get<long long>());
-                    }
-                    if (item.contains("caption") && !item["caption"].is_null())
-                        m.caption = item["caption"].value("text", "");
-                    int mt = item.value("media_type", 1);
-                    m.mediaType = (mt == 2) ? "video" : (mt == 8) ? "carousel" : "photo";
-                    if (item.contains("image_versions2") &&
-                        item["image_versions2"].contains("candidates") &&
-                        !item["image_versions2"]["candidates"].empty())
-                        m.imageUrl = item["image_versions2"]["candidates"][0].value("url","");
-                    if (item.contains("video_versions") && !item["video_versions"].empty())
-                        m.videoUrl = item["video_versions"][0].value("url","");
-                    if (item.contains("location") && !item["location"].is_null()) {
-                        m.location        = item["location"].value("name","");
-                        m.locationAddress = item["location"].value("address","");
-                    }
-                    if (item.contains("usertags") && item["usertags"].contains("in"))
-                        for (const auto& tag : item["usertags"]["in"])
-                            if (tag.contains("user"))
-                                m.taggedUsers.push_back(tag["user"].value("username",""));
-                    if (!m.caption.empty()) {
-                        std::regex hashRx("#(\\w+)");
-                        auto beg = std::sregex_iterator(m.caption.begin(), m.caption.end(), hashRx);
-                        for (auto it = beg; it != std::sregex_iterator(); ++it)
-                            m.hashtags.push_back(it->str());
-                    }
-                    items.push_back(m);
+                    items.push_back(ParseV1MediaItem(item));
                     fetched++;
                 }
                 if (!data.value("more_available", false)) break;
                 nextMaxId = ExtractNextMaxId(data);
                 if (nextMaxId.empty()) break;
-            } catch (const std::exception& ex) {
-                std::cerr << "[DBG] FetchUserFeed parse error: " << ex.what() << std::endl;
-                break;
+            } catch (...) { break; }
+        }
+        if (!items.empty()) return items;
+
+        // --- Strategy 2: GraphQL query (works for web sessions) ---
+        // Try multiple query hashes — Instagram rotates these
+        std::vector<std::string> queryHashes = {
+            "e769aa130647d2354c40ea6a439bfc08",
+            "003056d32c2554def87228bc3fd9668a",
+            "69cba40317214236af40e7efa697781d",
+            "42323d64886122307be10013ad2dcc44"
+        };
+        std::string endCursor;
+        for (const auto& hash : queryHashes) {
+            if (fetched > 0) break; // one hash worked, stop trying others
+            endCursor.clear();
+            while (fetched < maxCount) {
+                json vars;
+                vars["id"] = userId;
+                vars["first"] = std::min(12, maxCount - fetched);
+                if (!endCursor.empty()) vars["after"] = endCursor;
+
+                std::string url = WEB_BASE + "/graphql/query/?query_hash=" + hash
+                                + "&variables=" + urlEncode(vars.dump());
+                ResponseData resp = MakeAuthenticatedRequest(url);
+                std::string body = GetResponseBody(resp);
+                if (resp.statusCode == 400 || resp.statusCode == 404) break; // bad hash, try next
+                if (resp.statusCode < 200 || resp.statusCode >= 300) break;
+                try {
+                    json data = json::parse(body);
+                    // Navigate to edge_owner_to_timeline_media
+                    json* media = nullptr;
+                    if (data.contains("data") && data["data"].contains("user"))
+                        media = &data["data"]["user"]["edge_owner_to_timeline_media"];
+                    else if (data.contains("user"))
+                        media = &data["user"]["edge_owner_to_timeline_media"];
+                    if (!media || !media->contains("edges")) break;
+
+                    for (const auto& edge : (*media)["edges"]) {
+                        if (fetched >= maxCount) break;
+                        if (!edge.contains("node")) continue;
+                        items.push_back(ParseGraphQLMediaNode(edge["node"]));
+                        fetched++;
+                    }
+                    if (!(*media).contains("page_info") ||
+                        !(*media)["page_info"].value("has_next_page", false))
+                        break;
+                    endCursor = (*media)["page_info"].value("end_cursor", "");
+                    if (endCursor.empty()) break;
+                } catch (...) { break; }
+            }
+        }
+        if (!items.empty()) return items;
+
+        // --- Strategy 3: /{username}/?__a=1&__d=dis scrape ---
+        // Need the username — look it up from the target info
+        {
+            std::string username;
+            if (_hasTarget && _currentTarget.userId == userId)
+                username = _currentTarget.username;
+            if (!username.empty()) {
+                std::string url = WEB_BASE + "/" + urlEncode(username) + "/?__a=1&__d=dis";
+                ResponseData resp = MakeAuthenticatedRequest(url);
+                std::string body = GetResponseBody(resp);
+                if (resp.statusCode >= 200 && resp.statusCode < 300 && !body.empty()) {
+                    try {
+                        json data = json::parse(body);
+                        json* media = nullptr;
+                        if (data.contains("graphql") && data["graphql"].contains("user"))
+                            media = &data["graphql"]["user"]["edge_owner_to_timeline_media"];
+                        else if (data.contains("user"))
+                            media = &data["user"]["edge_owner_to_timeline_media"];
+                        if (media && media->contains("edges")) {
+                            for (const auto& edge : (*media)["edges"]) {
+                                if (fetched >= maxCount) break;
+                                if (!edge.contains("node")) continue;
+                                items.push_back(ParseGraphQLMediaNode(edge["node"]));
+                                fetched++;
+                            }
+                        }
+                    } catch (...) {}
+                }
             }
         }
         return items;
@@ -1266,8 +1355,6 @@ namespace IG {
             if (!minId.empty()) url += "&min_id=" + minId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             std::string body = GetResponseBody(resp);
-            std::cerr << "[DBG] FetchMediaComments(" << mediaId << ") HTTP " << resp.statusCode
-                      << ", body=" << body.size() << "B" << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(body);
@@ -1294,7 +1381,6 @@ namespace IG {
                     minId = v.is_string() ? v.get<std::string>() : std::to_string(v.get<long long>());
                 } else break;
             } catch (const std::exception& ex) {
-                std::cerr << "[DBG] FetchMediaComments parse error: " << ex.what() << std::endl;
                 break;
             }
         }
@@ -1306,8 +1392,6 @@ namespace IG {
         std::vector<UserEntry> results;
         ResponseData resp = MakeAuthenticatedRequest(API_BASE + "/media/" + mediaId + "/likers/");
         std::string body = GetResponseBody(resp);
-        std::cerr << "[DBG] FetchMediaLikers(" << mediaId << ") HTTP " << resp.statusCode
-                  << ", body=" << body.size() << "B" << std::endl;
         if (resp.statusCode < 200 || resp.statusCode >= 300) return results;
         try {
             json data = json::parse(body);
@@ -1325,7 +1409,6 @@ namespace IG {
                 results.push_back(e);
             }
         } catch (const std::exception& ex) {
-            std::cerr << "[DBG] FetchMediaLikers parse error: " << ex.what() << std::endl;
         }
         return results;
     }
@@ -1415,14 +1498,10 @@ namespace IG {
             if (!nextMaxId.empty()) url += "&max_id=" + nextMaxId;
             ResponseData resp = MakeAuthenticatedRequest(url);
             std::string body = GetResponseBody(resp);
-            std::cerr << "[DBG] FetchUsertagsFeed HTTP " << resp.statusCode
-                      << ", body=" << body.size() << "B"
-                      << ", preview=" << body.substr(0, 120) << std::endl;
             if (resp.statusCode < 200 || resp.statusCode >= 300) break;
             try {
                 json data = json::parse(body);
                 if (!data.contains("items") || !data["items"].is_array()) {
-                    std::cerr << "[DBG] FetchUsertagsFeed: no 'items' array" << std::endl;
                     break;
                 }
                 for (const auto& item : data["items"]) {
@@ -1465,7 +1544,6 @@ namespace IG {
                 nextMaxId = ExtractNextMaxId(data);
                 if (nextMaxId.empty()) break;
             } catch (const std::exception& ex) {
-                std::cerr << "[DBG] FetchUsertagsFeed parse error: " << ex.what() << std::endl;
                 break;
             }
         }
