@@ -472,6 +472,20 @@ namespace IG {
             _currentUser.authenticated = true;
             // Update CSRF token if it changed
             ParseLoginCookies(loginResp.headers);
+
+            // Debug: show what cookies we captured
+            std::cerr << "[DBG] Session cookies:" << std::endl;
+            std::cerr << "  sessionid: " << (_currentUser.sessionId.empty() ? "(EMPTY)" : _currentUser.sessionId.substr(0, 10) + "...") << std::endl;
+            std::cerr << "  csrftoken: " << (_currentUser.csrfToken.empty() ? "(EMPTY)" : _currentUser.csrfToken.substr(0, 10) + "...") << std::endl;
+            std::cerr << "  ds_user_id: " << (_currentUser.dsUserId.empty() ? "(EMPTY)" : _currentUser.dsUserId) << std::endl;
+            std::cerr << "  mid: " << (_currentUser.mid.empty() ? "(EMPTY)" : _currentUser.mid.substr(0, 10) + "...") << std::endl;
+
+            // Verify session actually works
+            ResponseData verifyResp = MakeAuthenticatedRequest(API_BASE + "/accounts/current_user/?edit=true");
+            std::string verifyBody = GetResponseBody(verifyResp);
+            std::cerr << "[DBG] Session verify: HTTP " << verifyResp.statusCode
+                      << ", body=" << verifyBody.size() << "B" << std::endl;
+
             SaveSessionToFile();
             return true;
         }
@@ -997,6 +1011,9 @@ namespace IG {
                         std::string fUrl = API_BASE + "/friendships/show/" + info.userId + "/";
                         ResponseData fResp = MakeAuthenticatedRequest(fUrl);
                         std::string fBody = GetResponseBody(fResp);
+                        std::cerr << "[DBG] friendships/show: HTTP " << fResp.statusCode
+                                  << ", body=" << fBody.size() << "B"
+                                  << ", content: " << fBody.substr(0, 300) << std::endl;
                         if (!fBody.empty()) {
                             try {
                                 json fData = json::parse(fBody);
