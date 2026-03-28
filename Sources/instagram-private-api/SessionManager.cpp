@@ -691,7 +691,7 @@ namespace IG {
             body = GetResponseBody(resp);
 
             // Retry with increasing backoff on 429 (rate limit)
-            for (int wait : {3, 6, 10}) {
+            for (int wait : {5, 15, 30}) {
                 if (status != 429) break;
                 std::cerr << "[*] Rate limited, waiting " << wait << " seconds..." << std::endl;
                 std::this_thread::sleep_for(std::chrono::seconds(wait));
@@ -700,26 +700,75 @@ namespace IG {
                 body = GetResponseBody(resp);
             }
 
-            std::cerr << "[DBG] web_profile_info: HTTP " << status
-                      << ", body=" << body.size() << "B" << std::endl;
+            if (!body.empty() && body[0] == '{') {
+                std::cerr << "[+] web_profile_info: HTTP " << status
+                          << ", body=" << body.size() << "B" << std::endl;
+            } else {
+                std::cerr << "[DBG] web_profile_info: HTTP " << status
+                          << ", body=" << body.size() << "B" << std::endl;
+                body.clear();
+            }
         }
 
-        // Attempt 2: Instagram GraphQL queries (separate rate limit pool)
-        // Try multiple known doc_ids for user profile queries
-        if (body.empty() || body[0] != '{') {
-            std::vector<std::string> docIds = {
-                "9310670392322965",   // PolarisProfilePageContentQuery
-                "7862754640465977",   // PolarisProfilePageContentQuery (alt)
-                "8845758582119845",   // UserProfileQuery
-                "17888483320059182",  // ProfilePageQuery
+        // Attempt 2: /?__a=1&__d=dis public JSON endpoint
+        if (body.empty()) {
+            std::string url = WEB_BASE + "/" + username + "/?__a=1&__d=dis";
+            ResponseData resp = MakeAuthenticatedRequest(url);
+            status = resp.statusCode;
+            std::string respBody = GetResponseBody(resp);
+
+            std::cerr << "[DBG] __a=1: HTTP " << status
+                      << ", body=" << respBody.size() << "B" << std::endl;
+
+            if (!respBody.empty() && respBody[0] == '{') {
+                try {
+                    json test = json::parse(respBody);
+                    // Only accept if it has actual user data
+                    bool hasUser = (test.contains("graphql") && test["graphql"].contains("user")) ||
+                                   (test.contains("data") && !test["data"].is_null()) ||
+                                   test.contains("user");
+                    if (hasUser) body = respBody;
+                } catch (...) {}
+            }
+        }
+
+        // Attempt 3: GraphQL query_hash with full variables
+        if (body.empty()) {
+            std::string variables = urlEncode(
+                "{\"username\":\"" + username + "\","
+                "\"include_reel\":true,"
+                "\"include_logged_out\":true}");
+            std::string url = WEB_BASE + "/graphql/query/?query_hash=c9100bf9110dd6361671f113dd02e7d6&variables=" + variables;
+
+            ResponseData resp = MakeAuthenticatedRequest(url);
+            status = resp.statusCode;
+            std::string gqlResp = GetResponseBody(resp);
+
+            std::cerr << "[DBG] graphql: HTTP " << status
+                      << ", body=" << gqlResp.size() << "B"
+                      << ", content: " << gqlResp.substr(0, 400) << std::endl;
+
+            if (!gqlResp.empty() && gqlResp[0] == '{') {
+                try {
+                    json gql = json::parse(gqlResp);
+                    // Check for non-empty user object
+                    if (gql.contains("data") && gql["data"].contains("user") &&
+                        gql["data"]["user"].is_object() && !gql["data"]["user"].empty()) {
+                        body = gql.dump();
+                    }
+                } catch (...) {}
+            }
+        }
+
+        // Attempt 4: GraphQL POST with different doc_ids
+        if (body.empty()) {
+            std::vector<std::pair<std::string, std::string>> queries = {
+                {"9310670392322965", "{\"username\":\"" + username + "\",\"render_surface\":\"PROFILE\"}"},
+                {"17888483320059182", "{\"username\":\"" + username + "\"}"},
             };
 
-            for (const auto& docId : docIds) {
-                std::string variables = "{\"username\":\"" + username + "\",\"render_surface\":\"PROFILE\"}";
-                std::string graphqlBody =
-                    "variables=" + urlEncode(variables) +
-                    "&doc_id=" + docId;
-
+            for (const auto& [docId, vars] : queries) {
+                std::string graphqlBody = "variables=" + urlEncode(vars) + "&doc_id=" + docId;
                 ResponseData resp = MakeAuthenticatedRequest(
                     WEB_BASE + "/graphql/query/",
                     RequestMethod::REQ_POST,
@@ -727,17 +776,14 @@ namespace IG {
                 status = resp.statusCode;
                 std::string gqlResp = GetResponseBody(resp);
 
-                std::cerr << "[DBG] graphql doc_id=" << docId << ": HTTP " << status
-                          << ", body=" << gqlResp.size() << "B"
-                          << ", content: " << gqlResp.substr(0, 300) << std::endl;
-
                 if (!gqlResp.empty() && gqlResp[0] == '{') {
                     try {
                         json gql = json::parse(gqlResp);
-                        // Check for actual user data (not null/error)
                         if (gql.contains("data") && !gql["data"].is_null() &&
-                            gql["data"].contains("user") && !gql["data"]["user"].is_null()) {
+                            gql["data"].contains("user") && gql["data"]["user"].is_object() &&
+                            !gql["data"]["user"].empty()) {
                             body = gql.dump();
+                            std::cerr << "[+] graphql doc_id=" << docId << " succeeded" << std::endl;
                             break;
                         }
                     } catch (...) {}
@@ -745,48 +791,9 @@ namespace IG {
             }
         }
 
-        // Attempt 3: older GraphQL query_hash GET endpoints
-        if (body.empty() || body[0] != '{') {
-            std::vector<std::string> queryHashes = {
-                "c9100bf9110dd6361671f113dd02e7d6",
-                "d4d88dc1500312af6f937f7b804c68c3",
-                "69cba40317214236af40e7efa697781d",
-            };
-
-            for (const auto& hash : queryHashes) {
-                std::string variables = urlEncode("{\"username\":\"" + username + "\"}");
-                std::string url = WEB_BASE + "/graphql/query/?query_hash=" + hash + "&variables=" + variables;
-
-                ResponseData resp = MakeAuthenticatedRequest(url);
-                status = resp.statusCode;
-                std::string gqlResp = GetResponseBody(resp);
-
-                std::cerr << "[DBG] graphql_hash=" << hash.substr(0,8) << ": HTTP " << status
-                          << ", body=" << gqlResp.size() << "B"
-                          << ", content: " << gqlResp.substr(0, 300) << std::endl;
-
-                if (!gqlResp.empty() && gqlResp[0] == '{') {
-                    try {
-                        json gql = json::parse(gqlResp);
-                        if (gql.contains("data") && !gql["data"].is_null() &&
-                            gql["data"].contains("user") && !gql["data"]["user"].is_null()) {
-                            body = gql.dump();
-                            break;
-                        }
-                        // Some return graphql.user instead
-                        if (gql.contains("graphql") && gql["graphql"].contains("user") &&
-                            !gql["graphql"]["user"].is_null()) {
-                            body = gql.dump();
-                            break;
-                        }
-                    } catch (...) {}
-                }
-            }
-        }
-
-        if (body.empty() || body[0] != '{') {
+        if (body.empty()) {
             std::cerr << "[!] Failed to fetch profile for '" << username
-                      << "' (HTTP " << status << ")" << std::endl;
+                      << "' — all endpoints exhausted. Try again in a few minutes (rate limit)." << std::endl;
             return std::nullopt;
         }
 
