@@ -41,6 +41,9 @@ struct CommandExecution {
 
 bool timeMeasuringSystem = false;
 
+CommandExecution execCommand(const std::string& cmd, const std::vector<std::string>& args, const ShellEnvironment& env,
+                             const std::string& cmdLine);
+
 void helpCmd() {
     if (loadedLibraries.empty()) {
         std::cerr << "No commands have been added." << std::endl;
@@ -58,6 +61,7 @@ void helpCmd() {
     gPage.setSpaceWidth(5);
     gPage.setStartSpaceWidth(2);
     gPage.addArg("help", "", "Shows this help page");
+    gPage.addArg("queue", "", "Queues and runs multiple commands separated by ;");
     gPage.addArg("exit", "", "Exits this application");
     Terminal::println(std::cout, Terminal::TermColor::CYAN, gPage.display(), true);
 
@@ -327,6 +331,64 @@ namespace OsintgramCXX::AppShell {
 
                 if (cmdLine[0] == "help") {
                     helpCmd();
+                    continue;
+                }
+
+                if (cmdLine[0] == "queue") {
+                    std::string queueBody;
+                    if (isMultiline) {
+                        queueBody = multiLineCmd.substr(5);
+                    } else {
+                        queueBody = line.size() > 5 ? line.substr(5) : "";
+                    }
+                    queueBody = TrimString(queueBody);
+
+                    if (queueBody.empty()) {
+                        std::cerr << "Usage: queue <cmd1> ; <cmd2> ; ..." << std::endl;
+                        threadSleep(70);
+                        isMultiline = false;
+                        multiLineCmd = "";
+                        continue;
+                    }
+
+                    std::vector<std::string> queueItems = SplitString(queueBody, ";");
+                    for (auto& item : queueItems) {
+                        item = TrimString(item);
+                        if (item.empty()) continue;
+
+                        std::vector<std::string> qLine = TranslateStrToCmdline(item);
+                        if (qLine.empty()) continue;
+
+                        std::vector<std::string> qArgs;
+                        if (qLine.size() > 1) {
+                            for (size_t i = 1; i < qLine.size(); i++) qArgs.push_back(qLine[i]);
+                        }
+
+                        if (qLine[0] == "exit" || qLine[0] == "quit" || qLine[0] == "close") {
+                            stopShell(false);
+                            return;
+                        }
+
+                        if (qLine[0] == "help") {
+                            helpCmd();
+                            continue;
+                        }
+
+                        CommandExecution qRet = execCommand(qLine[0], qArgs, environment, item);
+                        if (!qRet.cmdFound) {
+                            std::cerr << qRet.msg << std::endl;
+                            threadSleep(70);
+                            continue;
+                        }
+
+                        if (qRet.rc != 0) {
+                            std::cerr << qLine[0] << ": exit code " << qRet.rc << std::endl;
+                            threadSleep(70);
+                        }
+                    }
+
+                    isMultiline = false;
+                    multiLineCmd = "";
                     continue;
                 }
 
