@@ -1372,24 +1372,30 @@ static int cmd_shared_activity(const std::vector<std::string>& args) {
         return 0;
     }
 
+    // Keep public accounts + private accounts followed by the logged-in user.
+    auto session = mgr.GetCurrentSession();
+    auto myFollowing = mgr.FetchFollowing(session.userId);
+    std::set<std::string> myFollowingSet;
+    for (const auto& u : myFollowing) myFollowingSet.insert(u.username);
+
     std::vector<IG::UserEntry> accountsToScan;
     accountsToScan.reserve(sharedFollowing.size());
     for (const auto& u : sharedFollowing) {
-        if (!u.isPrivate)
+        if (!u.isPrivate || myFollowingSet.count(u.username))
             accountsToScan.push_back(u);
     }
 
     if (accountsToScan.empty()) {
-        std::cout << "[*] Shared followings exist, but all are private. Nothing to scan." << std::endl;
+        std::cout << "[*] Shared followings exist, but all are private and not followed by you. Nothing to scan." << std::endl;
         return 0;
     }
 
     const int toScan = static_cast<int>(accountsToScan.size()); // unlimited: scan all
 
     std::cout << "[+] Shared followings: " << sharedFollowing.size()
-              << " | Public accounts to scan: " << toScan << std::endl;
+              << " | Scan-eligible accounts (public + private you follow): " << toScan << std::endl;
     std::cout << "[*] Scanning activity by @" << nameA << " and @" << nameB
-              << " across all shared public followings..." << std::endl << std::endl;
+              << " across shared followings..." << std::endl << std::endl;
 
     struct Activity {
         std::string actor;
