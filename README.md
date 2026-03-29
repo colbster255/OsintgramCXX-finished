@@ -49,8 +49,8 @@ $ pacman -S base-devel cmake tar unzip zip curl openssl zlib
 
 After installing these dependencies, run these two commands (simplified for VCPKG handling):
 ```shell
-$ https://github.com/colbster255/OsintgramCXX-finished.git
-$ cd OsintgramCXX
+$ git clone https://github.com/colbster255/OsintgramCXX-finished.git
+$ cd OsintgramCXX-finished
 $ chmod +x prepare.sh
 $ ./prepare.sh
 ```
