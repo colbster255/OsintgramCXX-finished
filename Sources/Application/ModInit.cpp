@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 
 #ifdef __linux__
 
@@ -218,8 +219,60 @@ void parse_json(const json& j) {
             libEntryData.label = command_set["label"];
             libEntryData.id = command_set["id"];
 
-            if (std::ranges::find(processedEntries, libEntryData.id) != processedEntries.end())
+            if (std::ranges::find(processedEntries, libEntryData.id) != processedEntries.end()) {
+                auto existing = std::find_if(
+                    OsintgramCXX::loadedLibraries.begin(),
+                    OsintgramCXX::loadedLibraries.end(),
+                    [&libEntryData](const auto& kv) {
+                        return kv.second.id == libEntryData.id;
+                    }
+                );
+
+                if (existing == OsintgramCXX::loadedLibraries.end())
+                    continue;
+
+                if (command_set["cmd_list"].is_array() && !command_set["cmd_list"].empty()) {
+                    for (const auto& cmd : command_set["cmd_list"]) {
+                        if (!(cmd.contains("cmd") && cmd.contains("description") && cmd.contains("exec_symbol")))
+                            continue;
+
+                        if (!(cmd["cmd"].is_string() && cmd["description"].is_string() && cmd["exec_symbol"].is_string()))
+                            continue;
+
+                        const std::string cmdName = cmd["cmd"];
+                        const auto alreadyAdded = std::ranges::find_if(
+                            existing->second.commands,
+                            [&cmdName](const OsintgramCXX::ShellLibEntry& entry) {
+                                return entry.cmd == cmdName;
+                            }
+                        );
+
+                        if (alreadyAdded != existing->second.commands.end())
+                            continue;
+
+                        std::string sym = cmd["exec_symbol"];
+                        void* funcPtr = get_method_from_handle(existing->first, sym.c_str());
+                        if (funcPtr == nullptr)
+                            throw std::runtime_error(
+                                std::string("Command symbol for duplicate command set not found, ") + sym);
+
+                        OsintgramCXX::C_CommandExec cmdExec = [funcPtr](const char* _c, int a, char** b, int c,
+                                                                        char** d) {
+                            return reinterpret_cast<int (*)(const char*, int, char**, int, char**)>(funcPtr)(_c, a,
+                                b, c,
+                                d);
+                        };
+
+                        OsintgramCXX::ShellLibEntry cmdEntry{};
+                        cmdEntry.cmd = cmdName;
+                        cmdEntry.description = cmd["description"];
+                        cmdEntry.execHandler = cmdExec;
+                        existing->second.commands.push_back(cmdEntry);
+                    }
+                }
+
                 continue;
+            }
 
             processedEntries.emplace_back(libEntryData.id);
 
