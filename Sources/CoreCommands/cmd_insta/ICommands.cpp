@@ -1485,6 +1485,192 @@ static int cmd_shared_activity(const std::vector<std::string>& args) {
 }
 
 // ============================================================================
+// Command: shared.comments - find posts where two targets both commented
+// ============================================================================
+static int cmd_shared_comments(const std::vector<std::string>& args) {
+    auto& mgr = IG::SessionManager::Instance();
+
+    if (!mgr.IsLoggedIn()) {
+        std::cerr << "[!] shared.comments: You must be logged in first" << std::endl;
+        return 1;
+    }
+
+    // Usage:
+    //   shared.comments <user1> <user2> [posts_per_account]
+    //   shared.comments <user2> [posts_per_account]   (active target vs <user2>)
+    //   shared.comments [posts_per_account]           (you vs active target)
+    std::string nameA, nameB;
+    std::string idA, idB;
+    int postsPerAccount = 10;
+
+    if (args.size() >= 2) {
+        nameA = args[0];
+        nameB = args[1];
+        if (args.size() >= 3) {
+            try { postsPerAccount = std::stoi(args[2]); } catch (...) {}
+        }
+
+        auto tA = resolveTarget(nameA);
+        auto tB = resolveTarget(nameB);
+        if (!tA) { std::cerr << "[!] Could not load @" << nameA << std::endl; return 1; }
+        if (!tB) { std::cerr << "[!] Could not load @" << nameB << std::endl; return 1; }
+        idA = tA->userId;
+        idB = tB->userId;
+    } else if (args.size() == 1) {
+        if (!mgr.HasTarget()) {
+            std::cerr << "[!] No active target set. Usage: shared.comments <user1> <user2> [posts_per_account]" << std::endl;
+            return 1;
+        }
+
+        const bool numericArg = std::all_of(args[0].begin(), args[0].end(), [](char c) {
+            return std::isdigit(static_cast<unsigned char>(c));
+        });
+
+        if (numericArg) {
+            auto session = mgr.GetCurrentSession();
+            auto target = mgr.GetTarget();
+            nameA = session.username;
+            idA   = session.userId;
+            nameB = target.username;
+            idB   = target.userId;
+            try { postsPerAccount = std::stoi(args[0]); } catch (...) {}
+        } else {
+            auto target = mgr.GetTarget();
+            nameA = target.username;
+            idA   = target.userId;
+            nameB = args[0];
+            auto tB = resolveTarget(nameB);
+            if (!tB) { std::cerr << "[!] Could not load @" << nameB << std::endl; return 1; }
+            idB = tB->userId;
+        }
+    } else {
+        if (!mgr.HasTarget()) {
+            std::cerr << "[!] shared.comments: No target set. Usage: shared.comments <user1> <user2> [posts_per_account]" << std::endl;
+            return 1;
+        }
+        auto session = mgr.GetCurrentSession();
+        auto target = mgr.GetTarget();
+        nameA = session.username;
+        idA   = session.userId;
+        nameB = target.username;
+        idB   = target.userId;
+    }
+
+    std::cout << "[*] Building shared following list between @" << nameA << " and @" << nameB << "..." << std::endl;
+
+    auto followingA = mgr.FetchFollowing(idA);
+    auto followingB = mgr.FetchFollowing(idB);
+
+    std::map<std::string, IG::UserEntry> followingByNameA;
+    for (const auto& f : followingA) followingByNameA[f.username] = f;
+
+    std::vector<IG::UserEntry> sharedFollowing;
+    for (const auto& f : followingB) {
+        auto it = followingByNameA.find(f.username);
+        if (it != followingByNameA.end()) {
+            IG::UserEntry merged = it->second;
+            merged.isPrivate = merged.isPrivate || f.isPrivate;
+            if (merged.userId.empty()) merged.userId = f.userId;
+            sharedFollowing.push_back(merged);
+        }
+    }
+
+    if (sharedFollowing.empty()) {
+        std::cout << "[*] No shared followings found between @" << nameA << " and @" << nameB << std::endl;
+        return 0;
+    }
+
+    // Keep public accounts + private accounts followed by the logged-in user.
+    auto session = mgr.GetCurrentSession();
+    auto myFollowing = mgr.FetchFollowing(session.userId);
+    std::set<std::string> myFollowingSet;
+    for (const auto& u : myFollowing) myFollowingSet.insert(u.username);
+
+    std::vector<IG::UserEntry> accountsToScan;
+    accountsToScan.reserve(sharedFollowing.size());
+    for (const auto& u : sharedFollowing) {
+        if (!u.isPrivate || myFollowingSet.count(u.username))
+            accountsToScan.push_back(u);
+    }
+
+    if (accountsToScan.empty()) {
+        std::cout << "[*] Shared followings exist, but all are private and not followed by you. Nothing to scan." << std::endl;
+        return 0;
+    }
+
+    struct MatchedPost {
+        std::string accountOwner;
+        std::string postTimestamp;
+        std::string postLink;
+        std::vector<std::string> commentsA;
+        std::vector<std::string> commentsB;
+    };
+    std::vector<MatchedPost> matches;
+
+    std::cout << "[+] Shared followings: " << sharedFollowing.size()
+              << " | Scan-eligible accounts (public + private you follow): " << accountsToScan.size() << std::endl;
+    std::cout << "[*] Looking for posts where BOTH @" << nameA << " and @" << nameB
+              << " commented..." << std::endl << std::endl;
+
+    for (size_t i = 0; i < accountsToScan.size(); i++) {
+        const auto& account = accountsToScan[i];
+        std::cout << "\r[*] Scanning @" << account.username << " (" << (i + 1)
+                  << "/" << accountsToScan.size() << ")..." << std::flush;
+
+        auto feed = mgr.FetchUserFeed(account.userId, postsPerAccount);
+        for (const auto& item : feed) {
+            if (item.commentCount <= 0) continue;
+
+            auto comments = mgr.FetchMediaComments(item.mediaId);
+            std::vector<std::string> aComments;
+            std::vector<std::string> bComments;
+
+            for (const auto& c : comments) {
+                if (c.username == nameA) aComments.push_back(c.text);
+                if (c.username == nameB) bComments.push_back(c.text);
+            }
+
+            if (aComments.empty() || bComments.empty()) continue;
+
+            MatchedPost out;
+            out.accountOwner = account.username;
+            out.postTimestamp = item.takenAt;
+            out.postLink = item.shortcode.empty() ? "" : ("https://www.instagram.com/p/" + item.shortcode + "/");
+            out.commentsA = std::move(aComments);
+            out.commentsB = std::move(bComments);
+            matches.push_back(std::move(out));
+        }
+    }
+
+    std::cout << std::endl << std::endl;
+
+    if (matches.empty()) {
+        std::cout << "[*] No posts found where BOTH @" << nameA << " and @" << nameB
+                  << " commented in shared followings." << std::endl;
+        return 0;
+    }
+
+    std::cout << "[+] Found " << matches.size()
+              << " post(s) where both users commented:" << std::endl << std::endl;
+
+    for (size_t i = 0; i < matches.size(); i++) {
+        const auto& m = matches[i];
+        std::cout << "  " << (i + 1) << ". Posted by @" << m.accountOwner;
+        if (!m.postTimestamp.empty() && m.postTimestamp != "0")
+            std::cout << " on " << formatTimestamp(m.postTimestamp);
+        std::cout << std::endl;
+        std::cout << "      @" << nameA << " commented:" << std::endl;
+        for (const auto& c : m.commentsA) std::cout << "        - " << c << std::endl;
+        std::cout << "      @" << nameB << " commented:" << std::endl;
+        for (const auto& c : m.commentsB) std::cout << "        - " << c << std::endl;
+        std::cout << "      Link: " << (m.postLink.empty() ? "(unavailable)" : m.postLink) << std::endl;
+        std::cout << std::endl;
+    }
+
+    return 0;
+}
+
+// ============================================================================
 // Command: u.mentions - find @target mentions in captions/comments of others
 // ============================================================================
 static int cmd_umentions(const std::vector<std::string>& args) {
@@ -1786,6 +1972,7 @@ static const std::map<std::string, InstaFunc> instaFuncMap = {
     {"u.tagged",      cmd_utagged},
     {"u.activity",    cmd_uactivity},
     {"shared.activity", cmd_shared_activity},
+    {"shared.comments", cmd_shared_comments},
     {"u.mentions",    cmd_umentions},
     {"fans",          cmd_fans},
     {"shared",        cmd_shared},
