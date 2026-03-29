@@ -199,6 +199,11 @@
                     "cmd": "shared.activity",
                     "description": "Scan shared followings (public + private you follow) for comments/likes by two targets",
                     "exec_symbol": "cmd_handle"
+                },
+                {
+                    "cmd": "shared.comments",
+                    "description": "Find posts from shared followings where both targets commented, with timestamps and links",
+                    "exec_symbol": "cmd_handle"
                 }
             ]
         }

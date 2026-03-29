@@ -11,6 +11,7 @@
 #include <fstream>
 #include <filesystem>
 #include <climits>
+#include <random>
 
 // OpenSSL for password encryption
 #include <openssl/rsa.h>
@@ -26,6 +27,52 @@ namespace IG {
     // Forward-declared helper (used in Login, LoadSession, FetchUserInfo, etc.)
     static std::string GetResponseBody(const ResponseData& resp) {
         try { return std::get<ByteData>(resp.body); } catch (...) { return ""; }
+    }
+
+    static void RateLimitDelay() {
+        static std::chrono::steady_clock::time_point lastRequest;
+        static std::mt19937 rng(std::random_device{}());
+        static int recentRequestCount = 0;
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRequest).count();
+
+        // Track burst frequency — reset if idle for >30s
+        if (elapsed > 30000) {
+            recentRequestCount = 0;
+        } else {
+            recentRequestCount++;
+        }
+
+        int delayMs = 0;
+
+        // Every 15-25 requests, take a longer "human break" (5-12 seconds)
+        if (recentRequestCount > 0) {
+            std::uniform_int_distribution<int> burstThreshold(15, 25);
+            if (recentRequestCount % burstThreshold(rng) == 0) {
+                std::uniform_int_distribution<int> longPause(5000, 12000);
+                delayMs = longPause(rng);
+            }
+        }
+
+        if (delayMs == 0) {
+            if (elapsed < 1500) {
+                // Back-to-back requests — enforce minimum gap with jitter
+                std::uniform_int_distribution<int> dist(1500, 4000);
+                delayMs = dist(rng);
+            } else if (elapsed < 5000) {
+                // Recent request — add moderate jitter
+                std::uniform_int_distribution<int> dist(500, 2000);
+                delayMs = dist(rng);
+            }
+            // If >5s since last request, no delay needed
+        }
+
+        if (delayMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+
+        lastRequest = std::chrono::steady_clock::now();
     }
 
     const std::string SessionManager::API_BASE = "https://www.instagram.com/api/v1";
@@ -144,6 +191,7 @@ namespace IG {
         req.readTimeoutMillis = 30000;
         req.followRedirects   = true;
         req.verifySSL         = true;
+        RateLimitDelay();
         return CreateRequest(req);
     }
 
@@ -156,6 +204,7 @@ namespace IG {
         req.readTimeoutMillis = 30000;
         req.followRedirects = true;
         req.verifySSL       = true;
+        RateLimitDelay();
         return CreateRequest(req);
     }
 
